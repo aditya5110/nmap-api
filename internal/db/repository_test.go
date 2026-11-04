@@ -1,0 +1,274 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"testing"
+	"time"
+
+	"nmap-api/internal/config"
+	"nmap-api/internal/domain"
+
+	"github.com/DATA-DOG/go-sqlmock"
+)
+
+func TestPGXConfigEscapesCredentials(t *testing.T) {
+	cfg, err := pgxConfig(config.Config{
+		DBHost:     "localhost",
+		DBPort:     5432,
+		DBUser:     "user@name",
+		DBPassword: "p@ss:/?#% with spaces",
+		DBName:     "nmap db",
+		DBSSLMode:  "disable",
+	})
+	if err != nil {
+		t.Fatalf("pgxConfig returned error: %v", err)
+	}
+	if cfg.User != "user@name" {
+		t.Errorf("expected user to round-trip, got %q", cfg.User)
+	}
+	if cfg.Password != "p@ss:/?#% with spaces" {
+		t.Errorf("expected password to round-trip, got %q", cfg.Password)
+	}
+	if cfg.Database != "nmap db" {
+		t.Errorf("expected database name to round-trip, got %q", cfg.Database)
+	}
+}
+
+func TestCreateScanRequestWithJobs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	request := domain.ScanRequest{RequestUUID: "6e0aa93a-4d0a-45ac-8ff0-ace0e1480e2c", Status: "pending"}
+	jobs := []domain.ScanJob{{TargetValue: "8.8.8.8", TargetType: "ip", Status: "pending", TimeoutSeconds: 120}}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO scan_requests").WithArgs(request.RequestUUID, request.Status).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(77)))
+	mock.ExpectQuery("INSERT INTO scan_jobs").WithArgs(int64(77), jobs[0].TargetValue, jobs[0].TargetType, jobs[0].Status, jobs[0].TimeoutSeconds, 0, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(11)))
+	mock.ExpectCommit()
+
+	id, err := repo.CreateScanRequestWithJobs(context.Background(), request, jobs)
+	if err != nil {
+		t.Fatalf("CreateScanRequestWithJobs returned error: %v", err)
+	}
+	if id != 77 {
+		t.Fatalf("expected request id 77, got %d", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestCreateScanRequestWithJobs_RequiresJobs(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	_, err = repo.CreateScanRequestWithJobs(context.Background(), domain.ScanRequest{}, nil)
+	if err == nil || err.Error() != "at least one job is required" {
+		t.Fatalf("expected validation error, got %v", err)
+	}
+}
+
+func TestCreateScanRequestWithJobs_RollsBackAfterJobInsertFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	request := domain.ScanRequest{RequestUUID: "6e0aa93a-4d0a-45ac-8ff0-ace0e1480e2c", Status: "pending"}
+	jobs := []domain.ScanJob{
+		{TargetValue: "8.8.8.8", TargetType: "ip", Status: "pending", TimeoutSeconds: 120},
+		{TargetValue: "example.com", TargetType: "hostname", Status: "invalid", TimeoutSeconds: 120},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO scan_requests").WithArgs(request.RequestUUID, request.Status).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(77)))
+	mock.ExpectQuery("INSERT INTO scan_jobs").WithArgs(int64(77), jobs[0].TargetValue, jobs[0].TargetType, jobs[0].Status, jobs[0].TimeoutSeconds, 0, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(11)))
+	mock.ExpectQuery("INSERT INTO scan_jobs").WithArgs(int64(77), jobs[1].TargetValue, jobs[1].TargetType, jobs[1].Status, jobs[1].TimeoutSeconds, 0, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnError(errors.New("constraint violation"))
+	mock.ExpectRollback()
+
+	if _, err := repo.CreateScanRequestWithJobs(context.Background(), request, jobs); err == nil {
+		t.Fatal("expected second job insert to fail")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestUpdateJobStatus(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC().Truncate(time.Second)
+	finished := started.Add(30 * time.Second)
+	errorText := "timeout"
+	lease := finished.Add(30 * time.Second)
+
+	mock.ExpectExec("UPDATE scan_jobs").WithArgs("completed", started, finished, errorText, lease, int64(42)).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateJobStatus(context.Background(), 42, "completed", &started, &finished, &errorText, &lease); err != nil {
+		t.Fatalf("UpdateJobStatus returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestGetJobsByRequestID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC().Truncate(time.Second)
+	finished := started.Add(2 * time.Minute)
+	errorText := "scan limit reached"
+	rows := sqlmock.NewRows([]string{"id", "request_id", "target_value", "target_type", "status", "created_at", "updated_at", "started_at", "finished_at", "timeout_seconds", "attempts", "error_message", "lease_expires_at"})
+	rows.AddRow(int64(10), int64(7), "scanme.nmap.org", "hostname", "completed", time.Now().UTC(), time.Now().UTC(), started, finished, 120, 1, errorText, finished.Add(10*time.Minute))
+	mock.ExpectQuery("SELECT id, request_id, target_value, target_type, status").WithArgs(int64(7)).WillReturnRows(rows)
+
+	jobs, err := repo.GetJobsByRequestID(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("GetJobsByRequestID returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].TargetValue != "scanme.nmap.org" {
+		t.Fatalf("expected target scanme.nmap.org, got %s", jobs[0].TargetValue)
+	}
+	if jobs[0].ErrorMessage == nil || *jobs[0].ErrorMessage != errorText {
+		t.Fatalf("expected error message %q, got %v", errorText, jobs[0].ErrorMessage)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSaveScanResultWithPorts(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC().Truncate(time.Second)
+	finished := started.Add(3 * time.Second)
+	result := domain.ScanResult{JobID: 9, TargetValue: "example.com", HostIP: "93.184.216.34", HostStatus: "up", StartedAt: started, FinishedAt: finished, RawXML: "<nmap></nmap>"}
+	ports := []domain.ScanPort{{Port: 80, Protocol: "tcp", State: "open", ServiceName: strPtr("http"), Reason: strPtr("syn-ack")}}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO scan_results").WithArgs(result.JobID, result.TargetValue, result.HostIP, result.HostStatus, result.StartedAt, result.FinishedAt, result.RawXML).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(42)))
+	mock.ExpectExec("INSERT INTO scan_ports").WithArgs(int64(42), ports[0].Port, ports[0].Protocol, ports[0].State, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	id, err := repo.SaveScanResultWithPorts(context.Background(), result, ports)
+	if err != nil {
+		t.Fatalf("SaveScanResultWithPorts returned error: %v", err)
+	}
+	if id != 42 {
+		t.Fatalf("expected result id 42, got %d", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSaveScanResultWithPorts_RollsBackAfterPortInsertFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC().Truncate(time.Second)
+	finished := started.Add(3 * time.Second)
+	result := domain.ScanResult{JobID: 9, TargetValue: "example.com", HostIP: "93.184.216.34", HostStatus: "up", StartedAt: started, FinishedAt: finished, RawXML: "<nmap></nmap>"}
+	ports := []domain.ScanPort{
+		{Port: 80, Protocol: "tcp", State: "open"},
+		{Port: 443, Protocol: "tcp", State: "open"},
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO scan_results").WithArgs(result.JobID, result.TargetValue, result.HostIP, result.HostStatus, result.StartedAt, result.FinishedAt, result.RawXML).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(42)))
+	mock.ExpectExec("INSERT INTO scan_ports").WithArgs(int64(42), ports[0].Port, ports[0].Protocol, ports[0].State, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO scan_ports").WithArgs(int64(42), ports[1].Port, ports[1].Protocol, ports[1].State, sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnError(errors.New("constraint violation"))
+	mock.ExpectRollback()
+
+	if _, err := repo.SaveScanResultWithPorts(context.Background(), result, ports); err == nil {
+		t.Fatal("expected second port insert to fail")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestNullConversions(t *testing.T) {
+	if got := nullableTime(nil); got.Valid {
+		t.Fatal("expected invalid nullable time for nil")
+	}
+	if got := nullableString(nil); got.Valid {
+		t.Fatal("expected invalid nullable string for nil")
+	}
+
+	msg := "ok"
+	tm := time.Now().UTC()
+	if got := nullableString(&msg); !got.Valid || got.String != msg {
+		t.Fatalf("expected valid string, got %#v", got)
+	}
+	if got := nullableTime(&tm); !got.Valid || !got.Time.Equal(tm) {
+		t.Fatalf("expected valid time, got %#v", got)
+	}
+	if got := nullStringToPtr(sql.NullString{String: "value", Valid: true}); got == nil || *got != "value" {
+		t.Fatalf("expected converted string pointer, got %v", got)
+	}
+	if got := nullTimeToPtr(sql.NullTime{Time: tm, Valid: true}); got == nil || !got.Equal(tm) {
+		t.Fatalf("expected converted time pointer, got %v", got)
+	}
+	if got := nullStringToPtr(sql.NullString{Valid: false}); got != nil {
+		t.Fatalf("expected nil for invalid null string, got %v", got)
+	}
+	if got := nullTimeToPtr(sql.NullTime{Valid: false}); got != nil {
+		t.Fatalf("expected nil for invalid null time, got %v", got)
+	}
+}
+
+func TestGetJobByID_NotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	mock.ExpectQuery("SELECT id, request_id, target_value, target_type, status").WithArgs(int64(99)).WillReturnError(errors.New("sql: no rows in result set"))
+	if _, err := repo.GetJobByID(context.Background(), 99); err == nil {
+		t.Fatal("expected error when job is missing")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func strPtr(v string) *string {
+	return &v
+}
