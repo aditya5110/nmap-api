@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nmap-api/internal/domain"
 	"nmap-api/internal/service"
@@ -115,13 +116,75 @@ func TestScansEndpointRejectsUnsupportedMethods(t *testing.T) {
 	}
 }
 
+func TestGetScanHistoryReturnsJSONAndEmptyArray(t *testing.T) {
+	repo := &recordingScanRepository{}
+	handler := newTestHandler(t, repo, nil, 20, 60)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/targets/EXAMPLE.com/scans?limit=5", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unexpected history response: status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	if repo.historyTarget != "example.com" || repo.historyLimit != 5 {
+		t.Fatalf("history query used target=%q limit=%d", repo.historyTarget, repo.historyLimit)
+	}
+	var result struct {
+		Target string               `json:"target"`
+		Scans  []domain.ScanHistory `json:"scans"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	if result.Target != "EXAMPLE.com" || result.Scans == nil || len(result.Scans) != 0 {
+		t.Fatalf("expected original target and empty scans array, got %#v", result)
+	}
+}
+
+func TestGetChangesEndpointReturnsComparableDiff(t *testing.T) {
+	previousStarted := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	currentStarted := previousStarted.Add(time.Hour)
+	repo := &recordingScanRepository{comparableScans: []domain.ScanHistory{
+		{ScanID: 41, Status: "completed", StartedAt: &previousStarted, FinishedAt: timePtr(previousStarted.Add(time.Minute)), ResolvedIPs: []string{"192.0.2.1"}, HostStatuses: map[string]string{"192.0.2.1": "up"}, Ports: []domain.ObservedScanPort{{ResolvedIP: "192.0.2.1", Port: 80, Protocol: "tcp", State: "filtered"}}},
+		{ScanID: 42, Status: "completed", StartedAt: &currentStarted, FinishedAt: timePtr(currentStarted.Add(time.Minute)), ResolvedIPs: []string{"192.0.2.1"}, HostStatuses: map[string]string{"192.0.2.1": "up"}, Ports: []domain.ObservedScanPort{{ResolvedIP: "192.0.2.1", Port: 80, Protocol: "tcp", State: "open"}}},
+	}}
+	handler := newTestHandler(t, repo, nil, 20, 60)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/targets/history.example/changes", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unexpected changes response: status=%d content-type=%q body=%s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	var changes service.ChangesResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &changes); err != nil {
+		t.Fatalf("decode changes response: %v", err)
+	}
+	if changes.PreviousScanID != 41 || changes.CurrentScanID != 42 || len(changes.ChangedPorts) != 1 || changes.ChangedPorts[0].ResolvedIP != "192.0.2.1" {
+		t.Fatalf("unexpected changes response body: %#v", changes)
+	}
+}
+
+func TestGetScansRejectsInvalidLimit(t *testing.T) {
+	repo := &recordingScanRepository{}
+	handler := newTestHandler(t, repo, nil, 20, 60)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/targets/history.example/scans?limit=101", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	assertErrorResponse(t, response, http.StatusBadRequest, "INVALID_LIMIT")
+}
+
 func newTestHandler(t *testing.T, repo *recordingScanRepository, allowed []string, batchLimit, defaultTimeout int) http.Handler {
 	t.Helper()
 	scanService, err := service.NewScanService(repo, batchLimit, defaultTimeout, allowed)
 	if err != nil {
 		t.Fatalf("create scan service: %v", err)
 	}
-	return NewHandler(scanService)
+	return NewHandler(scanService, service.NewHistoryService(repo))
 }
 
 func assertErrorResponse(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {
@@ -142,9 +205,13 @@ func assertErrorResponse(t *testing.T, response *httptest.ResponseRecorder, stat
 }
 
 type recordingScanRepository struct {
-	calls   int
-	request domain.ScanRequest
-	jobs    []domain.ScanJob
+	calls           int
+	request         domain.ScanRequest
+	jobs            []domain.ScanJob
+	history         []domain.ScanHistory
+	comparableScans []domain.ScanHistory
+	historyTarget   string
+	historyLimit    int
 }
 
 func (r *recordingScanRepository) CreateScanRequestWithJobs(_ context.Context, request domain.ScanRequest, jobs []domain.ScanJob) (int64, error) {
@@ -153,3 +220,16 @@ func (r *recordingScanRepository) CreateScanRequestWithJobs(_ context.Context, r
 	r.jobs = append([]domain.ScanJob(nil), jobs...)
 	return 1, nil
 }
+
+func (r *recordingScanRepository) GetScanHistory(_ context.Context, target string, limit int) ([]domain.ScanHistory, error) {
+	r.historyTarget = target
+	r.historyLimit = limit
+	return r.history, nil
+}
+
+func (r *recordingScanRepository) GetLatestComparableScans(_ context.Context, target string) ([]domain.ScanHistory, error) {
+	r.historyTarget = target
+	return r.comparableScans, nil
+}
+
+func timePtr(value time.Time) *time.Time { return &value }

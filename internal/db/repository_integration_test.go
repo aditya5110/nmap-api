@@ -401,6 +401,136 @@ func TestPostgresCompletionReplacesResultsWithoutDuplicates(t *testing.T) {
 	}
 }
 
+func TestPostgresScanHistoryOrderingLimitAndMultipleIPs(t *testing.T) {
+	db, repo, ctx := newIntegrationRepository(t)
+	requestID := createIntegrationRequest(t, ctx, db)
+	created := time.Now().UTC()
+	olderID := completeIntegrationScan(t, ctx, db, repo, requestID, "history.example", created.Add(-2*time.Minute), []integrationHostScan{
+		{ip: "192.0.2.71", ports: []domain.ScanPort{{Port: 22, Protocol: "tcp", State: "open"}}},
+		{ip: "2001:db8::71", ports: []domain.ScanPort{{Port: 443, Protocol: "tcp", State: "filtered"}}},
+	})
+	newerID := completeIntegrationScan(t, ctx, db, repo, requestID, "history.example", created.Add(-time.Minute), []integrationHostScan{
+		{ip: "192.0.2.71", ports: []domain.ScanPort{{Port: 22, Protocol: "tcp", State: "closed"}}},
+		{ip: "2001:db8::71", ports: []domain.ScanPort{{Port: 443, Protocol: "tcp", State: "open"}}},
+	})
+
+	history, err := repo.GetScanHistory(ctx, "HISTORY.EXAMPLE", 10)
+	if err != nil {
+		t.Fatalf("query scan history: %v", err)
+	}
+	if len(history) != 2 || history[0].ScanID != newerID || history[1].ScanID != olderID {
+		t.Fatalf("history is not newest first: %#v", history)
+	}
+	if len(history[0].ResolvedIPs) != 2 || len(history[0].Ports) != 2 {
+		t.Fatalf("multiple host results were not included: %#v", history[0])
+	}
+	if limited, err := repo.GetScanHistory(ctx, "history.example", 1); err != nil || len(limited) != 1 || limited[0].ScanID != newerID {
+		t.Fatalf("history limit failed: scans=%#v err=%v", limited, err)
+	}
+	if empty, err := repo.GetScanHistory(ctx, "no-history.example", 10); err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("expected empty non-nil history, scans=%#v err=%v", empty, err)
+	}
+}
+
+func TestPostgresLatestComparableCompletedScans(t *testing.T) {
+	db, repo, ctx := newIntegrationRepository(t)
+	requestID := createIntegrationRequest(t, ctx, db)
+	created := time.Now().UTC()
+	olderID := completeIntegrationScan(t, ctx, db, repo, requestID, "compare.example", created.Add(-3*time.Minute), []integrationHostScan{
+		{ip: "192.0.2.81", ports: []domain.ScanPort{{Port: 80, Protocol: "tcp", State: "open"}}},
+		{ip: "192.0.2.82", ports: []domain.ScanPort{{Port: 443, Protocol: "tcp", State: "open"}}},
+	})
+	comparableID := completeIntegrationScan(t, ctx, db, repo, requestID, "compare.example", created.Add(-2*time.Minute), []integrationHostScan{
+		{ip: "192.0.2.81", ports: []domain.ScanPort{{Port: 80, Protocol: "tcp", State: "closed"}}},
+		{ip: "192.0.2.82", ports: []domain.ScanPort{{Port: 443, Protocol: "tcp", State: "open"}}},
+	})
+	completeIntegrationScan(t, ctx, db, repo, requestID, "compare.example", created.Add(-time.Minute), []integrationHostScan{
+		{ip: "192.0.2.83", ports: []domain.ScanPort{{Port: 22, Protocol: "tcp", State: "open"}}},
+	})
+	failedID := createIntegrationJob(t, ctx, db, requestID, "compare.example", created)
+	failedJob, err := repo.ClaimNextJob(ctx, 150*time.Second)
+	if err != nil || failedJob == nil || failedJob.ID != failedID {
+		t.Fatalf("claim incomplete scan fixture: job=%#v err=%v", failedJob, err)
+	}
+	if updated, err := repo.UpdateClaimedJobStatus(ctx, *failedJob, "failed", time.Now().UTC(), strPtr("fixture failure")); err != nil || !updated {
+		t.Fatalf("mark latest fixture failed: updated=%v err=%v", updated, err)
+	}
+
+	comparable, err := repo.GetLatestComparableScans(ctx, "compare.example")
+	if err != nil {
+		t.Fatalf("query comparable scans: %v", err)
+	}
+	if len(comparable) != 2 || comparable[0].ScanID != olderID || comparable[1].ScanID != comparableID {
+		t.Fatalf("expected latest pair with matching resolved IPs, got %#v", comparable)
+	}
+}
+
+func TestPostgresHistoryAndChangesMatchTrailingDotHostnames(t *testing.T) {
+	db, repo, ctx := newIntegrationRepository(t)
+	requestID := createIntegrationRequest(t, ctx, db)
+	created := time.Now().UTC()
+	olderID := completeIntegrationScan(t, ctx, db, repo, requestID, "trailing.example.", created.Add(-time.Minute), []integrationHostScan{
+		{ip: "192.0.2.91", ports: []domain.ScanPort{{Port: 80, Protocol: "tcp", State: "open"}}},
+	})
+	newerID := completeIntegrationScan(t, ctx, db, repo, requestID, "trailing.example.", created, []integrationHostScan{
+		{ip: "192.0.2.91", ports: []domain.ScanPort{{Port: 80, Protocol: "tcp", State: "closed"}}},
+	})
+
+	for _, target := range []string{"trailing.example", "TRAILING.EXAMPLE."} {
+		history, err := repo.GetScanHistory(ctx, target, 10)
+		if err != nil {
+			t.Fatalf("history lookup for %q: %v", target, err)
+		}
+		if len(history) != 2 || history[0].ScanID != newerID || history[1].ScanID != olderID {
+			t.Fatalf("history lookup for %q returned %#v", target, history)
+		}
+		if history[0].HostStatuses["192.0.2.91"] != "up" {
+			t.Fatalf("history lookup for %q omitted resolved host status: %#v", target, history[0].HostStatuses)
+		}
+
+		comparable, err := repo.GetLatestComparableScans(ctx, target)
+		if err != nil {
+			t.Fatalf("changes lookup for %q: %v", target, err)
+		}
+		if len(comparable) != 2 || comparable[0].ScanID != olderID || comparable[1].ScanID != newerID {
+			t.Fatalf("changes lookup for %q returned %#v", target, comparable)
+		}
+	}
+}
+
+type integrationHostScan struct {
+	ip     string
+	status string
+	ports  []domain.ScanPort
+}
+
+func completeIntegrationScan(t *testing.T, ctx context.Context, db *sql.DB, repo *Repository, requestID int64, target string, createdAt time.Time, hosts []integrationHostScan) int64 {
+	t.Helper()
+	jobID := createIntegrationJob(t, ctx, db, requestID, target, createdAt)
+	job, err := repo.ClaimNextJob(ctx, 150*time.Second)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("claim integration scan %d: job=%#v err=%v", jobID, job, err)
+	}
+	startedAt := time.Now().UTC()
+	results := make([]domain.ScanResult, 0, len(hosts))
+	ports := make([][]domain.ScanPort, 0, len(hosts))
+	for _, host := range hosts {
+		hostStatus := host.status
+		if hostStatus == "" {
+			hostStatus = "up"
+		}
+		results = append(results, domain.ScanResult{
+			JobID: jobID, TargetValue: target, HostIP: host.ip, HostStatus: hostStatus,
+			StartedAt: startedAt, FinishedAt: startedAt.Add(time.Second), RawXML: "<nmaprun />",
+		})
+		ports = append(ports, host.ports)
+	}
+	if err := repo.CompleteJobWithResults(ctx, *job, results, ports); err != nil {
+		t.Fatalf("complete integration scan %d: %v", jobID, err)
+	}
+	return jobID
+}
+
 func newIntegrationRepository(t *testing.T) (*sql.DB, *Repository, context.Context) {
 	t.Helper()
 

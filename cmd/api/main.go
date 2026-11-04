@@ -46,6 +46,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure scan service: %w", err)
 	}
+	historyService := service.NewHistoryService(repository)
 	nmapRunner, err := nmap.NewRunner("", time.Duration(cfg.DefaultTimeoutSeconds)*time.Second)
 	if err != nil {
 		return fmt.Errorf("configure Nmap runner: %w", err)
@@ -61,7 +62,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              cfg.APIAddr(),
-		Handler:           api.NewHandler(scanService),
+		Handler:           api.NewHandler(scanService, historyService),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
