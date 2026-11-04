@@ -14,8 +14,225 @@ type Repository struct {
 	db *sql.DB
 }
 
+var ErrClaimLost = errors.New("scan job claim is no longer current")
+
+const MaxJobAttempts = 3
+
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
+}
+
+func (r *Repository) ClaimNextJob(ctx context.Context, leaseDuration time.Duration) (*domain.ScanJob, error) {
+	if leaseDuration <= 0 {
+		return nil, errors.New("lease duration must be greater than zero")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin job claim transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var id int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM scan_jobs
+		 WHERE status = 'pending'
+		 ORDER BY created_at, id
+		 LIMIT 1
+		 FOR UPDATE SKIP LOCKED`,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select pending job: %w", err)
+	}
+
+	job, err := scanJob(tx.QueryRowContext(ctx,
+		`UPDATE scan_jobs
+		 SET status = 'running', started_at = NOW(), finished_at = NULL,
+		     attempts = attempts + 1, error_message = NULL,
+		     lease_expires_at = NOW() + ($1 * INTERVAL '1 millisecond'), updated_at = NOW()
+		 WHERE id = $2 AND status = 'pending'
+		 RETURNING id, request_id, target_value, target_type, status, created_at, updated_at,
+		           started_at, finished_at, timeout_seconds, attempts, error_message, lease_expires_at`,
+		leaseDuration.Milliseconds(), id,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("mark claimed job running: %w", err)
+	}
+	if err := refreshScanRequestStatus(ctx, tx, job.RequestID); err != nil {
+		return nil, fmt.Errorf("update scan request status after claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit job claim: %w", err)
+	}
+	return &job, nil
+}
+
+func (r *Repository) RecoverExpiredJobs(ctx context.Context) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin lease recovery transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE scan_jobs
+		 SET status = CASE WHEN attempts >= $1 THEN 'failed' ELSE 'pending' END,
+		     updated_at = NOW(), finished_at = CASE WHEN attempts >= $1 THEN NOW() ELSE NULL END,
+		     error_message = CASE WHEN attempts >= $1 THEN 'lease expired after maximum attempts' ELSE NULL END,
+		     lease_expires_at = NULL
+		 WHERE status = 'running' AND lease_expires_at <= NOW()
+		 RETURNING request_id`,
+		MaxJobAttempts,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover expired jobs: %w", err)
+	}
+	requestIDs := make(map[int64]struct{})
+	var count int64
+	for rows.Next() {
+		var requestID int64
+		if err := rows.Scan(&requestID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("read recovered job request id: %w", err)
+		}
+		requestIDs[requestID] = struct{}{}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("iterate recovered jobs: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close recovered jobs rows: %w", err)
+	}
+	for requestID := range requestIDs {
+		if err := refreshScanRequestStatus(ctx, tx, requestID); err != nil {
+			return 0, fmt.Errorf("update scan request status after lease recovery: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit lease recovery: %w", err)
+	}
+	return count, nil
+}
+
+func (r *Repository) UpdateClaimedJobStatus(ctx context.Context, claim domain.ScanJob, status string, finishedAt time.Time, errorMessage *string) (bool, error) {
+	if claim.StartedAt == nil || claim.LeaseExpiresAt == nil {
+		return false, errors.New("claimed job is missing its claim token")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin claimed job status transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var requestID int64
+	err = tx.QueryRowContext(ctx,
+		`UPDATE scan_jobs
+		 SET status = $1, updated_at = NOW(), finished_at = $2,
+		     error_message = $3, lease_expires_at = NULL
+		 WHERE id = $4 AND status = 'running' AND started_at = $5 AND lease_expires_at = $6
+		 RETURNING request_id`,
+		status, finishedAt, nullableString(errorMessage), claim.ID, *claim.StartedAt, *claim.LeaseExpiresAt,
+	).Scan(&requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("update claimed job status: %w", err)
+	}
+	if err := refreshScanRequestStatus(ctx, tx, requestID); err != nil {
+		return false, fmt.Errorf("update scan request status after job failure: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit claimed job status: %w", err)
+	}
+	return true, nil
+}
+
+func (r *Repository) CompleteJobWithResults(ctx context.Context, claim domain.ScanJob, results []domain.ScanResult, ports [][]domain.ScanPort) error {
+	if claim.StartedAt == nil || claim.LeaseExpiresAt == nil {
+		return errors.New("claimed job is missing its claim token")
+	}
+	if len(results) == 0 || len(results) != len(ports) {
+		return errors.New("scan results and port groups must be non-empty and have matching lengths")
+	}
+	for _, result := range results {
+		if result.JobID != claim.ID {
+			return errors.New("scan result job id does not match claimed job")
+		}
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin job completion transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var requestID int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT request_id FROM scan_jobs
+		 WHERE id = $1 AND status = 'running' AND started_at = $2 AND lease_expires_at = $3
+		 FOR UPDATE`,
+		claim.ID, *claim.StartedAt, *claim.LeaseExpiresAt,
+	).Scan(&requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClaimLost
+	}
+	if err != nil {
+		return fmt.Errorf("lock claimed job for completion: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_results WHERE job_id = $1`, claim.ID); err != nil {
+		return fmt.Errorf("remove previous results for job: %w", err)
+	}
+	for resultIndex, result := range results {
+		var resultID int64
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO scan_results (job_id, target_value, host_ip, host_status, started_at, finished_at, raw_xml)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+			result.JobID, result.TargetValue, result.HostIP, result.HostStatus,
+			result.StartedAt, result.FinishedAt, result.RawXML,
+		).Scan(&resultID); err != nil {
+			return fmt.Errorf("insert scan result for %s: %w", result.HostIP, err)
+		}
+		for _, port := range ports[resultIndex] {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO scan_ports (scan_result_id, port, protocol, state, service_name, reason)
+				 VALUES ($1, $2, $3, $4, $5, $6)`,
+				resultID, port.Port, port.Protocol, port.State,
+				nullableString(port.ServiceName), nullableString(port.Reason),
+			); err != nil {
+				return fmt.Errorf("insert scan port %d/%s: %w", port.Port, port.Protocol, err)
+			}
+		}
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE scan_jobs SET status = 'completed', updated_at = NOW(), finished_at = NOW(),
+		 error_message = NULL, lease_expires_at = NULL
+		 WHERE id = $1 AND status = 'running' AND started_at = $2 AND lease_expires_at = $3`,
+		claim.ID, *claim.StartedAt, *claim.LeaseExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("mark claimed job completed: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count completed jobs: %w", err)
+	}
+	if rows != 1 {
+		return ErrClaimLost
+	}
+	if err := refreshScanRequestStatus(ctx, tx, requestID); err != nil {
+		return fmt.Errorf("update scan request status after job completion: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit job completion: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) CreateScanRequestWithJobs(ctx context.Context, req domain.ScanRequest, jobs []domain.ScanJob) (int64, error) {
@@ -65,18 +282,34 @@ func (r *Repository) CreateScanRequestWithJobs(ctx context.Context, req domain.S
 }
 
 func (r *Repository) UpdateJobStatus(ctx context.Context, jobID int64, status string, startedAt, finishedAt *time.Time, errorMessage *string, leaseExpiresAt *time.Time) error {
-	_, err := r.db.ExecContext(
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin job status transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var requestID int64
+	err = tx.QueryRowContext(
 		ctx,
-		`UPDATE scan_jobs SET status = $1, updated_at = NOW(), started_at = COALESCE($2, started_at), finished_at = COALESCE($3, finished_at), error_message = $4, lease_expires_at = $5 WHERE id = $6`,
+		`UPDATE scan_jobs SET status = $1, updated_at = NOW(), started_at = COALESCE($2, started_at), finished_at = COALESCE($3, finished_at), error_message = $4, lease_expires_at = $5 WHERE id = $6 RETURNING request_id`,
 		status,
 		nullableTime(startedAt),
 		nullableTime(finishedAt),
 		nullableString(errorMessage),
 		nullableTime(leaseExpiresAt),
 		jobID,
-	)
+	).Scan(&requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("update job status: %w", err)
+	}
+	if err := refreshScanRequestStatus(ctx, tx, requestID); err != nil {
+		return fmt.Errorf("update scan request status after job status update: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit job status update: %w", err)
 	}
 	return nil
 }
@@ -229,4 +462,86 @@ func nullStringToPtr(value sql.NullString) *string {
 	}
 	v := value.String
 	return &v
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(row rowScanner) (domain.ScanJob, error) {
+	var job domain.ScanJob
+	var startedAt, finishedAt, leaseExpiresAt sql.NullTime
+	var errorMessage sql.NullString
+	if err := row.Scan(
+		&job.ID,
+		&job.RequestID,
+		&job.TargetValue,
+		&job.TargetType,
+		&job.Status,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&startedAt,
+		&finishedAt,
+		&job.TimeoutSeconds,
+		&job.Attempts,
+		&errorMessage,
+		&leaseExpiresAt,
+	); err != nil {
+		return domain.ScanJob{}, err
+	}
+	job.StartedAt = nullTimeToPtr(startedAt)
+	job.FinishedAt = nullTimeToPtr(finishedAt)
+	job.LeaseExpiresAt = nullTimeToPtr(leaseExpiresAt)
+	job.ErrorMessage = nullStringToPtr(errorMessage)
+	return job, nil
+}
+
+func refreshScanRequestStatus(ctx context.Context, tx *sql.Tx, requestID int64) error {
+	var lockedID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM scan_requests WHERE id = $1 FOR UPDATE`, requestID).Scan(&lockedID); err != nil {
+		return fmt.Errorf("lock scan request %d: %w", requestID, err)
+	}
+
+	var total, pending, running, failed, timedOut int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*),
+		        COUNT(*) FILTER (WHERE status = 'pending'),
+		        COUNT(*) FILTER (WHERE status = 'running'),
+		        COUNT(*) FILTER (WHERE status = 'failed'),
+		        COUNT(*) FILTER (WHERE status = 'timed_out')
+		 FROM scan_jobs WHERE request_id = $1`,
+		requestID,
+	).Scan(&total, &pending, &running, &failed, &timedOut); err != nil {
+		return fmt.Errorf("aggregate scan request %d jobs: %w", requestID, err)
+	}
+	if total == 0 {
+		return fmt.Errorf("scan request %d has no jobs", requestID)
+	}
+
+	status, err := deriveScanRequestStatus(total, pending, running, failed, timedOut)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE scan_requests SET status = $1, updated_at = NOW() WHERE id = $2`, status, requestID); err != nil {
+		return fmt.Errorf("update scan request %d status: %w", requestID, err)
+	}
+	return nil
+}
+
+func deriveScanRequestStatus(total, pending, running, failed, timedOut int64) (string, error) {
+	if total <= 0 {
+		return "", errors.New("scan request has no jobs")
+	}
+	switch {
+	case pending == total:
+		return "pending", nil
+	case pending > 0 || running > 0:
+		return "running", nil
+	case failed > 0:
+		return "failed", nil
+	case timedOut > 0:
+		return "timed_out", nil
+	default:
+		return "completed", nil
+	}
 }

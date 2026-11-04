@@ -34,7 +34,7 @@ func TestRunnerRunPassesArgumentsAndCapturesOutputSeparately(t *testing.T) {
 		shellQuote(argsPath),
 		shellQuote(xml),
 	)
-	runner := newTestRunner(t, script, time.Second)
+	runner := newTestRunner(t, script, 5*time.Second)
 
 	output, err := runner.Run(context.Background(), "scanme.example")
 	if err != nil {
@@ -83,6 +83,15 @@ func TestRunnerRunDistinguishesConfiguredTimeout(t *testing.T) {
 	}
 	if errors.Is(err, ErrParentDeadline) || errors.Is(err, ErrParentCanceled) {
 		t.Fatalf("configured timeout was misclassified as parent context ending: %v", err)
+	}
+}
+
+func TestRunnerRunWithTimeoutUsesPerScanTimeout(t *testing.T) {
+	runner := newTestRunner(t, "exec /bin/sleep 5\n", 5*time.Second)
+
+	_, err := runner.RunWithTimeout(context.Background(), "scanme.example", 50*time.Millisecond)
+	if !errors.Is(err, ErrScanTimeout) {
+		t.Fatalf("expected per-scan timeout, got %v", err)
 	}
 }
 

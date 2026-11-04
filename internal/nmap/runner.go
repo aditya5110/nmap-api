@@ -61,14 +61,25 @@ func (r *Runner) Run(ctx context.Context, target string) (RunOutput, error) {
 	if r == nil {
 		return RunOutput{}, errors.New("nmap runner is not configured")
 	}
+	return r.RunWithTimeout(ctx, target, r.timeout)
+}
+
+// RunWithTimeout invokes Nmap using a timeout specific to this scan.
+func (r *Runner) RunWithTimeout(ctx context.Context, target string, timeout time.Duration) (RunOutput, error) {
+	if r == nil {
+		return RunOutput{}, errors.New("nmap runner is not configured")
+	}
 	if ctx == nil {
 		return RunOutput{}, errors.New("nmap context must not be nil")
 	}
 	if target == "" {
 		return RunOutput{}, errors.New("nmap target must not be empty")
 	}
+	if timeout <= 0 {
+		return RunOutput{}, errors.New("nmap timeout must be greater than zero")
+	}
 
-	scanCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	scanCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	args := []string{

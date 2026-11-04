@@ -106,6 +106,188 @@ func TestCreateScanRequestWithJobs_RollsBackAfterJobInsertFailure(t *testing.T) 
 	}
 }
 
+func TestClaimNextJob_CommitsClaim(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC()
+	lease := started.Add(150 * time.Second)
+	now := started.Add(-time.Minute)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM scan_jobs").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(25)))
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs(int64(150000), int64(25)).WillReturnRows(sqlmock.NewRows([]string{
+		"id", "request_id", "target_value", "target_type", "status", "created_at", "updated_at", "started_at", "finished_at", "timeout_seconds", "attempts", "error_message", "lease_expires_at",
+	}).AddRow(int64(25), int64(3), "scanme.nmap.org", "hostname", "running", now, started, started, nil, 120, 1, nil, lease))
+	expectRequestStatus(mock, int64(3), "running", 2, 1, 1, 0, 0)
+	mock.ExpectCommit()
+
+	job, err := repo.ClaimNextJob(context.Background(), 150*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextJob returned error: %v", err)
+	}
+	if job == nil || job.ID != 25 || job.Status != "running" || job.Attempts != 1 {
+		t.Fatalf("unexpected claimed job: %#v", job)
+	}
+	if job.StartedAt == nil || !job.StartedAt.Equal(started) || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.Equal(lease) {
+		t.Fatalf("claim timestamps were not returned: %#v", job)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestClaimNextJob_RollsBackWhenUpdateFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM scan_jobs").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(25)))
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs(int64(150000), int64(25)).WillReturnError(errors.New("database error"))
+	mock.ExpectRollback()
+
+	if _, err := repo.ClaimNextJob(context.Background(), 150*time.Second); err == nil {
+		t.Fatal("expected claim update failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestClaimNextJob_NoAvailableJob(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM scan_jobs").WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	job, err := repo.ClaimNextJob(context.Background(), 150*time.Second)
+	if err != nil || job != nil {
+		t.Fatalf("expected no job and no error, got job=%v err=%v", job, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestRecoverExpiredJobs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs(MaxJobAttempts).WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow(int64(3)).AddRow(int64(3)))
+	expectRequestStatus(mock, int64(3), "running", 2, 1, 0, 1, 0)
+	mock.ExpectCommit()
+	count, err := repo.RecoverExpiredJobs(context.Background())
+	if err != nil || count != 2 {
+		t.Fatalf("expected two recovered jobs, count=%d err=%v", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestUpdateClaimedJobStatus_FencesStaleClaim(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC()
+	lease := started.Add(150 * time.Second)
+	claim := domain.ScanJob{ID: 8, StartedAt: &started, LeaseExpiresAt: &lease}
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs("failed", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(8), started, lease).WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	updated, err := repo.UpdateClaimedJobStatus(context.Background(), claim, "failed", time.Now().UTC(), nil)
+	if err != nil || updated {
+		t.Fatalf("expected stale claim to update no row, updated=%v err=%v", updated, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestCompleteJobWithResults_Transactional(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC()
+	lease := started.Add(150 * time.Second)
+	claim := domain.ScanJob{ID: 9, StartedAt: &started, LeaseExpiresAt: &lease}
+	result := domain.ScanResult{JobID: 9, TargetValue: "example.com", HostIP: "192.0.2.1", HostStatus: "up", StartedAt: started, FinishedAt: lease, RawXML: "xml"}
+	ports := [][]domain.ScanPort{{{Port: 80, Protocol: "tcp", State: "open"}}}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT request_id FROM scan_jobs").WithArgs(int64(9), started, lease).WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow(int64(3)))
+	mock.ExpectExec("DELETE FROM scan_results").WithArgs(int64(9)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("INSERT INTO scan_results").WithArgs(int64(9), "example.com", "192.0.2.1", "up", started, lease, "xml").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(44)))
+	mock.ExpectExec("INSERT INTO scan_ports").WithArgs(int64(44), 80, "tcp", "open", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE scan_jobs").WithArgs(int64(9), started, lease).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectRequestStatus(mock, int64(3), "completed", 1, 0, 0, 0, 0)
+	mock.ExpectCommit()
+
+	if err := repo.CompleteJobWithResults(context.Background(), claim, []domain.ScanResult{result}, ports); err != nil {
+		t.Fatalf("CompleteJobWithResults returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestCompleteJobWithResults_RollsBackOnPortFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewRepository(db)
+	started := time.Now().UTC()
+	lease := started.Add(150 * time.Second)
+	claim := domain.ScanJob{ID: 9, StartedAt: &started, LeaseExpiresAt: &lease}
+	result := domain.ScanResult{JobID: 9, TargetValue: "example.com", HostIP: "192.0.2.1", HostStatus: "up", StartedAt: started, FinishedAt: lease, RawXML: "xml"}
+	ports := [][]domain.ScanPort{{{Port: 80, Protocol: "tcp", State: "open"}}}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT request_id FROM scan_jobs").WithArgs(int64(9), started, lease).WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow(int64(3)))
+	mock.ExpectExec("DELETE FROM scan_results").WithArgs(int64(9)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO scan_results").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(44)))
+	mock.ExpectExec("INSERT INTO scan_ports").WillReturnError(errors.New("constraint violation"))
+	mock.ExpectRollback()
+
+	if err := repo.CompleteJobWithResults(context.Background(), claim, []domain.ScanResult{result}, ports); err == nil {
+		t.Fatal("expected port insertion failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestUpdateJobStatus(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -119,7 +301,10 @@ func TestUpdateJobStatus(t *testing.T) {
 	errorText := "timeout"
 	lease := finished.Add(30 * time.Second)
 
-	mock.ExpectExec("UPDATE scan_jobs").WithArgs("completed", started, finished, errorText, lease, int64(42)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs("completed", started, finished, errorText, lease, int64(42)).WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow(int64(7)))
+	expectRequestStatus(mock, int64(7), "completed", 1, 0, 0, 0, 0)
+	mock.ExpectCommit()
 
 	if err := repo.UpdateJobStatus(context.Background(), 42, "completed", &started, &finished, &errorText, &lease); err != nil {
 		t.Fatalf("UpdateJobStatus returned error: %v", err)
@@ -271,4 +456,40 @@ func TestGetJobByID_NotFound(t *testing.T) {
 
 func strPtr(v string) *string {
 	return &v
+}
+
+func expectRequestStatus(mock sqlmock.Sqlmock, requestID int64, status string, total, pending, running, failed, timedOut int64) {
+	mock.ExpectQuery("SELECT id FROM scan_requests WHERE id = \\$1 FOR UPDATE").WithArgs(requestID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(requestID))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WithArgs(requestID).
+		WillReturnRows(sqlmock.NewRows([]string{"total", "pending", "running", "failed", "timed_out"}).AddRow(total, pending, running, failed, timedOut))
+	mock.ExpectExec("UPDATE scan_requests SET status").WithArgs(status, requestID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func TestDeriveScanRequestStatus(t *testing.T) {
+	tests := []struct {
+		name                            string
+		total, pending, running, failed int64
+		timedOut                        int64
+		want                            string
+	}{
+		{name: "all pending", total: 3, pending: 3, want: "pending"},
+		{name: "running", total: 3, pending: 1, running: 1, failed: 1, want: "running"},
+		{name: "pending mixed with terminal", total: 2, pending: 1, failed: 1, want: "running"},
+		{name: "all completed", total: 2, want: "completed"},
+		{name: "completed and timed out", total: 2, timedOut: 1, want: "timed_out"},
+		{name: "failed takes precedence", total: 3, failed: 1, timedOut: 1, want: "failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := deriveScanRequestStatus(test.total, test.pending, test.running, test.failed, test.timedOut)
+			if err != nil || got != test.want {
+				t.Fatalf("deriveScanRequestStatus() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := deriveScanRequestStatus(0, 0, 0, 0, 0); err == nil {
+		t.Fatal("expected zero-job request to be rejected")
+	}
 }
