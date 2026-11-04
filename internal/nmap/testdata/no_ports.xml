@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<nmaprun start="1700000100">
+  <host>
+    <status state="up" />
+    <address addr="198.51.100.25" addrtype="ipv4" />
+    <ports />
+  </host>
+  <runstats>
+    <finished time="1700000101" />
+  </runstats>
+</nmaprun>

@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<nmaprun start="1700000000">
+  <host starttime="1700000001" endtime="1700000002">
+    <status state="up" reason="syn-ack" />
+    <address addr="192.0.2.10" addrtype="ipv4" />
+    <address addr="192.0.2.10" addrtype="ipv4" />
+    <ports>
+      <port protocol="tcp" portid="80">
+        <state state="open" reason="syn-ack" />
+        <service name="http" />
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="closed" reason="reset" />
+        <service name="ssh" />
+      </port>
+      <port protocol="tcp" portid="443">
+        <state state="filtered" reason="no-response" />
+      </port>
+      <port protocol="tcp" portid="8443">
+        <state state="open|filtered" />
+      </port>
+    </ports>
+  </host>
+  <host starttime="1700000003" endtime="1700000004">
+    <status state="up" />
+    <address addr="2001:db8::10" addrtype="ipv6" />
+    <ports />
+  </host>
+  <host>
+    <status state="down" />
+    <address addr="192.0.2.10" addrtype="ipv4" />
+    <ports />
+  </host>
+  <runstats>
+    <finished time="1700000005" />
+  </runstats>
+</nmaprun>
