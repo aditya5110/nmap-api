@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -21,6 +22,7 @@ type Config struct {
 	WorkerCount           int
 	MaxBatchSize          int
 	DefaultTimeoutSeconds int
+	ScanAllowedTargets    []string
 	AppEnvironment        string
 }
 
@@ -41,6 +43,10 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	cfg.ScanAllowedTargets, err = getEnvList("SCAN_ALLOWED_TARGETS")
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid SCAN_ALLOWED_TARGETS: %w", err)
+	}
 	cfg.APIPort, err = getEnvInt("API_PORT", 8080)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid API_PORT: %w", err)
@@ -112,6 +118,23 @@ func getEnvInt(key string, fallback int) (int, error) {
 	}
 
 	return parsed, nil
+}
+
+func getEnvList(key string) ([]string, error) {
+	value := os.Getenv(key)
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	entries := strings.Split(value, ",")
+	result := make([]string, 0, len(entries))
+	for index, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, fmt.Errorf("entry %d is empty", index+1)
+		}
+		result = append(result, entry)
+	}
+	return result, nil
 }
 
 func getRequiredEnv(key string) string {
