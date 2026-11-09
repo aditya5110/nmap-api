@@ -211,20 +211,18 @@ the first scan to **closed** or **filtered** in the second scan.
 
 ## Expected Test Flow
 
-  Step   Action                     Expected Result
-  ------ -------------------------- ---------------------------------
-  1      Start Ubuntu VM            VM boots successfully
-  2      Obtain VM IP address       IP address identified
-  3      Clear PostgreSQL data      Fresh database records
-  4      Rebuild API                Latest API code is running
-  5      Start Ubuntu HTTP server   Port 8080 is listening
-  6      Submit first scan          Scan is created
-  7      Check scan history         Port 8080 should be open
-  8      Stop HTTP server           HTTP server stops
-  9      Check port 8080            Nothing is listening
-  10     Submit second scan         Another scan is created
-  11     Check scan history         Both scans are available
-  12     Check changes endpoint     Port state changes are reported
+1. **Start Ubuntu VM** — The VM boots successfully.
+2. **Obtain VM IP address** — Identify the VM's IP address.
+3. **Clear PostgreSQL data** — The database starts with fresh scan records.
+4. **Rebuild API** — The latest API code is running.
+5. **Start Ubuntu HTTP server** — Port `8080` is listening.
+6. **Submit first scan** — The first scan request is created.
+7. **Check scan history** — Port `8080` should be reported as open.
+8. **Stop HTTP server** — The HTTP server stops.
+9. **Check port 8080** — Nothing should be listening on port `8080`.
+10. **Submit second scan** — The second scan request is created.
+11. **Check scan history** — Both scans should appear in the history.
+12. **Check changes endpoint** — Port state changes between the two scans are reported.
 
 ## Important Notes
 
