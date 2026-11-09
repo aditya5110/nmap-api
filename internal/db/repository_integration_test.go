@@ -21,6 +21,7 @@ import (
 	"nmap-api/internal/domain"
 )
 
+// TestPostgresCreateScanRequestWithJobsRollback verifies PostgreSQL rolls back a request when a job violates a constraint.
 func TestPostgresCreateScanRequestWithJobsRollback(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 
@@ -43,6 +44,7 @@ func TestPostgresCreateScanRequestWithJobsRollback(t *testing.T) {
 	assertCount(t, ctx, db, "scan_jobs", 0)
 }
 
+// TestPostgresSaveScanResultWithPortsRollback verifies duplicate port observations roll back result persistence.
 func TestPostgresSaveScanResultWithPortsRollback(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 
@@ -83,6 +85,7 @@ func TestPostgresSaveScanResultWithPortsRollback(t *testing.T) {
 	assertCount(t, ctx, db, "scan_ports", 0)
 }
 
+// TestPostgresMigrationIndexes verifies the migration creates the expected indexes and omits redundant ones.
 func TestPostgresMigrationIndexes(t *testing.T) {
 	db, _, ctx := newIntegrationRepository(t)
 
@@ -129,6 +132,7 @@ func TestPostgresMigrationIndexes(t *testing.T) {
 	}
 }
 
+// TestPostgresConcurrentClaimsSkipLockedJobs verifies a locked pending job is skipped in favor of an available one.
 func TestPostgresConcurrentClaimsSkipLockedJobs(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -174,6 +178,7 @@ func TestPostgresConcurrentClaimsSkipLockedJobs(t *testing.T) {
 	}
 }
 
+// TestPostgresConcurrentWorkersClaimDifferentJobs verifies concurrent workers claim distinct jobs.
 func TestPostgresConcurrentWorkersClaimDifferentJobs(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -214,6 +219,7 @@ func TestPostgresConcurrentWorkersClaimDifferentJobs(t *testing.T) {
 	}
 }
 
+// TestPostgresExpiredLeaseRetriesThenFailsAndFencesStaleClaim verifies lease retries stop at the limit and stale claims are rejected.
 func TestPostgresExpiredLeaseRetriesThenFailsAndFencesStaleClaim(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -265,6 +271,7 @@ func TestPostgresExpiredLeaseRetriesThenFailsAndFencesStaleClaim(t *testing.T) {
 	}
 }
 
+// TestPostgresScanRequestStatusAggregationAndLeaseRecovery verifies job transitions and lease recovery update aggregate request status.
 func TestPostgresScanRequestStatusAggregationAndLeaseRecovery(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -311,6 +318,7 @@ func TestPostgresScanRequestStatusAggregationAndLeaseRecovery(t *testing.T) {
 	assertScanRequestStatus(t, ctx, db, requestID, "failed")
 }
 
+// TestPostgresLeaseRecoveryRefreshesMultipleRequests verifies recovering jobs refreshes each affected request.
 func TestPostgresLeaseRecoveryRefreshesMultipleRequests(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	firstRequestID := createIntegrationRequest(t, ctx, db)
@@ -332,6 +340,7 @@ func TestPostgresLeaseRecoveryRefreshesMultipleRequests(t *testing.T) {
 	assertScanRequestStatus(t, ctx, db, secondRequestID, "pending")
 }
 
+// TestPostgresScanRequestTerminalAggregateStatuses verifies completed and timed-out child jobs produce the correct final request status.
 func TestPostgresScanRequestTerminalAggregateStatuses(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 
@@ -361,6 +370,7 @@ func TestPostgresScanRequestTerminalAggregateStatuses(t *testing.T) {
 	assertScanRequestStatus(t, ctx, db, completedRequestID, "completed")
 }
 
+// TestPostgresCompletionReplacesResultsWithoutDuplicates verifies a later completion replaces prior results for the same job.
 func TestPostgresCompletionReplacesResultsWithoutDuplicates(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -401,6 +411,7 @@ func TestPostgresCompletionReplacesResultsWithoutDuplicates(t *testing.T) {
 	}
 }
 
+// TestPostgresScanHistoryOrderingLimitAndMultipleIPs verifies history ordering, limits, and multi-IP results.
 func TestPostgresScanHistoryOrderingLimitAndMultipleIPs(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -432,6 +443,7 @@ func TestPostgresScanHistoryOrderingLimitAndMultipleIPs(t *testing.T) {
 	}
 }
 
+// TestPostgresLatestComparableCompletedScans verifies changes queries select the latest completed pair with matching resolved IPs.
 func TestPostgresLatestComparableCompletedScans(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)
@@ -465,6 +477,7 @@ func TestPostgresLatestComparableCompletedScans(t *testing.T) {
 	}
 }
 
+// TestPostgresHistoryAndChangesMatchTrailingDotHostnames verifies hostname history lookups ignore case and a trailing dot.
 func TestPostgresHistoryAndChangesMatchTrailingDotHostnames(t *testing.T) {
 	db, repo, ctx := newIntegrationRepository(t)
 	requestID := createIntegrationRequest(t, ctx, db)

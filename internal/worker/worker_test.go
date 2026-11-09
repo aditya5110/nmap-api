@@ -17,6 +17,7 @@ import (
 
 const validScanXML = `<nmaprun start="1700000000"><host starttime="1700000000" endtime="1700000002"><status state="up"/><address addr="192.0.2.50" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open" reason="syn-ack"/><service name="http"/></port></ports></host><runstats><finished time="1700000002"/></runstats></nmaprun>`
 
+// TestProcessorSuccessfulScan verifies parsed host and port observations are stored for a completed scan.
 func TestProcessorSuccessfulScan(t *testing.T) {
 	repo := newTestRepository(testJob(1, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second)
@@ -41,6 +42,7 @@ func TestProcessorSuccessfulScan(t *testing.T) {
 	}
 }
 
+// TestProcessorNmapFailureIsFailed verifies an unsuccessful Nmap process marks its job failed with diagnostics.
 func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	repo := newTestRepository(testJob(2, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf 'connection failed' >&2\nexit 7\n", 60*time.Second)
@@ -56,6 +58,7 @@ func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	}
 }
 
+// TestProcessorNmapTimeoutIsTimedOut verifies a scan timeout gives the job a timed-out status.
 func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	repo := newTestRepository(testJob(3, "example.test", 1))
 	processor := newTestProcessor(t, repo, "exec /bin/sleep 5\n", time.Second)
@@ -70,6 +73,7 @@ func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	}
 }
 
+// TestProcessorXMLParsingFailureIsFailed verifies invalid Nmap XML fails the job without storing results.
 func TestProcessorXMLParsingFailureIsFailed(t *testing.T) {
 	repo := newTestRepository(testJob(4, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf '%s' '<not-nmap/>\n'\n", 60*time.Second)
@@ -86,6 +90,7 @@ func TestProcessorXMLParsingFailureIsFailed(t *testing.T) {
 	}
 }
 
+// TestProcessorPersistenceFailureMarksJobFailed verifies a result storage error marks the job failed.
 func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	repo := newTestRepository(testJob(5, "example.test", 60))
 	repo.completeErr = errors.New("database unavailable")
@@ -100,6 +105,7 @@ func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	}
 }
 
+// TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum verifies job timeouts are capped at the supported maximum.
 func TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum(t *testing.T) {
 	repo := newTestRepository(testJob(6, "example.test", 999))
 	runner := &recordingRunner{output: nmap.RunOutput{XML: []byte(validScanXML)}}
@@ -117,6 +123,7 @@ func TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum(t *testing.T) {
 	}
 }
 
+// TestProcessorShutdownCancellationLeavesClaimRecoverable verifies shutdown cancellation leaves a running job leased for recovery.
 func TestProcessorShutdownCancellationLeavesClaimRecoverable(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	repo := newTestRepository(testJob(7, "example.test", 120))
@@ -149,6 +156,7 @@ func TestProcessorShutdownCancellationLeavesClaimRecoverable(t *testing.T) {
 	}
 }
 
+// TestPoolContinuesAfterOrdinaryJobFailure verifies a failed job does not prevent the worker from processing another job.
 func TestPoolContinuesAfterOrdinaryJobFailure(t *testing.T) {
 	repo := newTestRepository(
 		testJob(8, "bad.example", 60),
@@ -186,6 +194,7 @@ func TestPoolContinuesAfterOrdinaryJobFailure(t *testing.T) {
 	}
 }
 
+// TestPoolCoordinatesPeriodicLeaseRecovery verifies one recovery loop periodically checks expired jobs.
 func TestPoolCoordinatesPeriodicLeaseRecovery(t *testing.T) {
 	repo := newTestRepository()
 	processor, err := NewProcessor(repo, &recordingRunner{}, time.Minute)
@@ -219,6 +228,7 @@ func TestPoolCoordinatesPeriodicLeaseRecovery(t *testing.T) {
 	}
 }
 
+// TestNewPoolRequiresPositiveWorkerCount verifies a pool cannot be created with zero workers.
 func TestNewPoolRequiresPositiveWorkerCount(t *testing.T) {
 	repo := newTestRepository()
 	processor, err := NewProcessor(repo, &recordingRunner{}, time.Minute)

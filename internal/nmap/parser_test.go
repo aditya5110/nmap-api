@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// TestParseXML_MultipleHostsAndPortStates verifies parsing of multiple resolved hosts and their port observations.
 func TestParseXML_MultipleHostsAndPortStates(t *testing.T) {
 	data := readFixture(t, "multi_host.xml")
 	result, err := ParseXML("scanme.example", data)
@@ -77,6 +78,7 @@ func TestParseXML_MultipleHostsAndPortStates(t *testing.T) {
 	}
 }
 
+// TestParseXML_HostWithNoPorts verifies a host without port entries produces an empty port list.
 func TestParseXML_HostWithNoPorts(t *testing.T) {
 	result, err := ParseXML("198.51.100.25", readFixture(t, "no_ports.xml"))
 	if err != nil {
@@ -93,6 +95,7 @@ func TestParseXML_HostWithNoPorts(t *testing.T) {
 	}
 }
 
+// TestParseXML_MalformedDocument verifies malformed Nmap XML is reported as a parse error.
 func TestParseXML_MalformedDocument(t *testing.T) {
 	_, err := ParseXML("example.test", []byte(`<nmaprun><host>`))
 	if err == nil || !strings.Contains(err.Error(), "decode Nmap XML") {
@@ -100,6 +103,7 @@ func TestParseXML_MalformedDocument(t *testing.T) {
 	}
 }
 
+// TestParseXML_RejectsUnusableHost verifies host records without usable IP addresses are rejected.
 func TestParseXML_RejectsUnusableHost(t *testing.T) {
 	data := []byte(`<nmaprun><host><status state="up"/><address addr="host.example" addrtype="hostname"/></host></nmaprun>`)
 	_, err := ParseXML("host.example", data)
@@ -108,6 +112,7 @@ func TestParseXML_RejectsUnusableHost(t *testing.T) {
 	}
 }
 
+// TestParseXML_RejectsInvalidPortAndTimestamp verifies invalid port fields and timestamps are rejected.
 func TestParseXML_RejectsInvalidPortAndTimestamp(t *testing.T) {
 	tests := []struct {
 		name string

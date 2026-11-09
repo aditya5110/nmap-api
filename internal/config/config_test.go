@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestLoadRejectsEmptyScanAllowedTargetsEntries verifies empty entries in the target allowlist are rejected.
 func TestLoadRejectsEmptyScanAllowedTargetsEntries(t *testing.T) {
 	values := []string{
 		",127.0.0.1",
@@ -24,6 +25,7 @@ func TestLoadRejectsEmptyScanAllowedTargetsEntries(t *testing.T) {
 	}
 }
 
+// TestLoadAllowsEmptyOrUnsetScanAllowedTargets verifies an empty or unset allowlist loads as empty.
 func TestLoadAllowsEmptyOrUnsetScanAllowedTargets(t *testing.T) {
 	tests := []struct {
 		name  string

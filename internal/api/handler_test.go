@@ -13,6 +13,7 @@ import (
 	"nmap-api/internal/service"
 )
 
+// TestPostScansAcceptsAllowedIPsAndHostname verifies allowed IPv4, IPv6, and hostname targets are accepted and persisted as pending jobs.
 func TestPostScansAcceptsAllowedIPsAndHostname(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, []string{"192.0.2.1", "Example.COM", "2001:db8::1"}, 20, 60)
@@ -47,6 +48,7 @@ func TestPostScansAcceptsAllowedIPsAndHostname(t *testing.T) {
 	}
 }
 
+// TestPostScansRejectsMixedBatchWithoutPersistence verifies a disallowed target rejects the entire batch before persistence.
 func TestPostScansRejectsMixedBatchWithoutPersistence(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, []string{"192.0.2.1", "allowed.example"}, 20, 60)
@@ -61,6 +63,7 @@ func TestPostScansRejectsMixedBatchWithoutPersistence(t *testing.T) {
 	}
 }
 
+// TestPostScansEmptyAllowlistDeniesAll verifies scan submissions are denied when no targets are allowlisted.
 func TestPostScansEmptyAllowlistDeniesAll(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, nil, 20, 60)
@@ -75,6 +78,7 @@ func TestPostScansEmptyAllowlistDeniesAll(t *testing.T) {
 	}
 }
 
+// TestPostScansRejectsInvalidLimitsAndMalformedJSON verifies invalid timeouts, oversized batches, malformed targets, and JSON return bad requests.
 func TestPostScansRejectsInvalidLimitsAndMalformedJSON(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -102,6 +106,7 @@ func TestPostScansRejectsInvalidLimitsAndMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestScansEndpointRejectsUnsupportedMethods verifies the scan submission route only accepts POST.
 func TestScansEndpointRejectsUnsupportedMethods(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, []string{"192.0.2.1"}, 20, 60)
@@ -116,6 +121,7 @@ func TestScansEndpointRejectsUnsupportedMethods(t *testing.T) {
 	}
 }
 
+// TestGetScanHistoryReturnsJSONAndEmptyArray verifies an empty history is returned as a successful JSON response.
 func TestGetScanHistoryReturnsJSONAndEmptyArray(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, nil, 20, 60)
@@ -142,6 +148,7 @@ func TestGetScanHistoryReturnsJSONAndEmptyArray(t *testing.T) {
 	}
 }
 
+// TestGetChangesEndpointReturnsComparableDiff verifies the changes route returns a diff for comparable scans.
 func TestGetChangesEndpointReturnsComparableDiff(t *testing.T) {
 	previousStarted := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
 	currentStarted := previousStarted.Add(time.Hour)
@@ -167,6 +174,7 @@ func TestGetChangesEndpointReturnsComparableDiff(t *testing.T) {
 	}
 }
 
+// TestGetScansRejectsInvalidLimit verifies history limits outside the supported range are rejected.
 func TestGetScansRejectsInvalidLimit(t *testing.T) {
 	repo := &recordingScanRepository{}
 	handler := newTestHandler(t, repo, nil, 20, 60)

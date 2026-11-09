@@ -13,6 +13,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+// TestPGXConfigEscapesCredentials verifies PostgreSQL connection settings preserve special characters in credentials.
 func TestPGXConfigEscapesCredentials(t *testing.T) {
 	cfg, err := pgxConfig(config.Config{
 		DBHost:     "localhost",
@@ -36,6 +37,7 @@ func TestPGXConfigEscapesCredentials(t *testing.T) {
 	}
 }
 
+// TestCreateScanRequestWithJobs verifies a request and its jobs are committed together.
 func TestCreateScanRequestWithJobs(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -64,6 +66,7 @@ func TestCreateScanRequestWithJobs(t *testing.T) {
 	}
 }
 
+// TestCreateScanRequestWithJobs_RequiresJobs verifies request creation rejects an empty job list.
 func TestCreateScanRequestWithJobs_RequiresJobs(t *testing.T) {
 	db, _, err := sqlmock.New()
 	if err != nil {
@@ -78,6 +81,7 @@ func TestCreateScanRequestWithJobs_RequiresJobs(t *testing.T) {
 	}
 }
 
+// TestCreateScanRequestWithJobs_RollsBackAfterJobInsertFailure verifies a failed job insert rolls back the request transaction.
 func TestCreateScanRequestWithJobs_RollsBackAfterJobInsertFailure(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -106,6 +110,7 @@ func TestCreateScanRequestWithJobs_RollsBackAfterJobInsertFailure(t *testing.T) 
 	}
 }
 
+// TestClaimNextJob_CommitsClaim verifies a pending job is marked running and its claim is committed.
 func TestClaimNextJob_CommitsClaim(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -141,6 +146,7 @@ func TestClaimNextJob_CommitsClaim(t *testing.T) {
 	}
 }
 
+// TestClaimNextJob_RollsBackWhenUpdateFails verifies a failed claim update rolls back the transaction.
 func TestClaimNextJob_RollsBackWhenUpdateFails(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -162,6 +168,7 @@ func TestClaimNextJob_RollsBackWhenUpdateFails(t *testing.T) {
 	}
 }
 
+// TestClaimNextJob_NoAvailableJob verifies claiming returns no job when none is pending.
 func TestClaimNextJob_NoAvailableJob(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -183,6 +190,7 @@ func TestClaimNextJob_NoAvailableJob(t *testing.T) {
 	}
 }
 
+// TestRecoverExpiredJobs verifies expired leases are recovered and parent request status is refreshed.
 func TestRecoverExpiredJobs(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -204,6 +212,7 @@ func TestRecoverExpiredJobs(t *testing.T) {
 	}
 }
 
+// TestUpdateClaimedJobStatus_FencesStaleClaim verifies an outdated claim cannot change a job status.
 func TestUpdateClaimedJobStatus_FencesStaleClaim(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -228,6 +237,7 @@ func TestUpdateClaimedJobStatus_FencesStaleClaim(t *testing.T) {
 	}
 }
 
+// TestCompleteJobWithResults_Transactional verifies results, ports, and job completion commit atomically.
 func TestCompleteJobWithResults_Transactional(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -259,6 +269,7 @@ func TestCompleteJobWithResults_Transactional(t *testing.T) {
 	}
 }
 
+// TestCompleteJobWithResults_RollsBackOnPortFailure verifies a port insertion error rolls back all completion writes.
 func TestCompleteJobWithResults_RollsBackOnPortFailure(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -288,6 +299,7 @@ func TestCompleteJobWithResults_RollsBackOnPortFailure(t *testing.T) {
 	}
 }
 
+// TestUpdateJobStatus verifies a job status change also refreshes its parent request status.
 func TestUpdateJobStatus(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -314,6 +326,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	}
 }
 
+// TestGetJobsByRequestID verifies jobs and nullable fields are loaded for a request.
 func TestGetJobsByRequestID(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -347,6 +360,7 @@ func TestGetJobsByRequestID(t *testing.T) {
 	}
 }
 
+// TestSaveScanResultWithPorts verifies a host result and its port observations are saved together.
 func TestSaveScanResultWithPorts(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -377,6 +391,7 @@ func TestSaveScanResultWithPorts(t *testing.T) {
 	}
 }
 
+// TestSaveScanResultWithPorts_RollsBackAfterPortInsertFailure verifies a failed port insert rolls back the host result.
 func TestSaveScanResultWithPorts_RollsBackAfterPortInsertFailure(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -407,6 +422,7 @@ func TestSaveScanResultWithPorts_RollsBackAfterPortInsertFailure(t *testing.T) {
 	}
 }
 
+// TestNullConversions verifies nullable database values convert to and from pointers correctly.
 func TestNullConversions(t *testing.T) {
 	if got := nullableTime(nil); got.Valid {
 		t.Fatal("expected invalid nullable time for nil")
@@ -437,6 +453,7 @@ func TestNullConversions(t *testing.T) {
 	}
 }
 
+// TestGetJobByID_NotFound verifies looking up a missing job returns an error.
 func TestGetJobByID_NotFound(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -467,6 +484,7 @@ func expectRequestStatus(mock sqlmock.Sqlmock, requestID int64, status string, t
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
+// TestDeriveScanRequestStatus verifies aggregate request statuses follow child job states.
 func TestDeriveScanRequestStatus(t *testing.T) {
 	tests := []struct {
 		name                            string

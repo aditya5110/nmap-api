@@ -8,6 +8,7 @@ import (
 	"nmap-api/internal/domain"
 )
 
+// TestChangesComparePortsByResolvedIPAndDoNotSynthesizeClosedState verifies diffs use resolved IP identity and preserve prior states for missing observations.
 func TestChangesComparePortsByResolvedIPAndDoNotSynthesizeClosedState(t *testing.T) {
 	started := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	service := NewHistoryService(fakeHistoryRepository{scans: []domain.ScanHistory{
@@ -54,6 +55,7 @@ func TestChangesComparePortsByResolvedIPAndDoNotSynthesizeClosedState(t *testing
 	}
 }
 
+// TestChangesDoNotRemovePortsWhenHostIsDown verifies ports are not reported as changed when a host is down in one scan.
 func TestChangesDoNotRemovePortsWhenHostIsDown(t *testing.T) {
 	started := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	historyService := NewHistoryService(fakeHistoryRepository{scans: []domain.ScanHistory{
@@ -81,6 +83,7 @@ func TestChangesDoNotRemovePortsWhenHostIsDown(t *testing.T) {
 	}
 }
 
+// TestHistoryReturnsEmptyWhenRepositoryHasNoScans verifies an empty scan history is returned without error.
 func TestHistoryReturnsEmptyWhenRepositoryHasNoScans(t *testing.T) {
 	repo := fakeHistoryRepository{}
 	historyService := NewHistoryService(repo)

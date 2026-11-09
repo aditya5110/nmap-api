@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// TestShutdownCancelsWorkersBeforeWaitingForHTTPHandlers verifies workers are canceled before graceful HTTP shutdown waits for active handlers.
 func TestShutdownCancelsWorkersBeforeWaitingForHTTPHandlers(t *testing.T) {
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	defer cancelWorkers()
