@@ -53,13 +53,15 @@ Validation errors return `400 Bad Request`. For example:
 }
 ```
 
-Other implemented validation codes include `INVALID_JSON`, `INVALID_REQUEST`, `BATCH_TOO_LARGE`, `INVALID_TIMEOUT`, and `TARGET_NOT_ALLOWED`. The body is limited to 1 MiB, unknown JSON fields are rejected, and exactly one JSON value is required. All targets are validated before persistence, so one bad or disallowed target rejects the complete batch.
+Other implemented validation codes include `INVALID_JSON`, `INVALID_REQUEST`, `BATCH_TOO_LARGE`, `INVALID_TIMEOUT`, `TARGET_NOT_ALLOWED`, and `INVALID_STATE`. The body is limited to 1 MiB, unknown JSON fields are rejected, and exactly one JSON value is required. All targets are validated before persistence, so one bad or disallowed target rejects the complete batch.
 
 ## 3. Recent history — `GET /api/v1/targets/{target}/scans`
 
-Returns recent jobs matching the submitted hostname or resolved IP, newest first. The optional `limit` query parameter defaults to 20 and must be an integer from 1 through 100. No matching history returns `200 OK` with an empty `scans` array; it does not return 404.
+Returns recent jobs matching the submitted hostname or resolved IP, newest first. The optional `limit` query parameter defaults to 20 and must be an integer from 1 through 100. The optional `state` parameter accepts `open`, `closed`, `filtered`, or `all`, case-insensitively. If omitted, only `open` and `closed` port observations are included. `state=all` includes every persisted port state. Filtering applies only to each scan's `ports` array after recent jobs are selected, so scans with no matching ports remain in the response. Unsupported or repeated `state` parameters return `400 Bad Request`. No matching history returns `200 OK` with an empty `scans` array; it does not return 404.
 
-Example: `GET /api/v1/targets/127.0.0.1/scans?limit=10`
+History and changes response timestamps are formatted in Indian Standard Time (IST, UTC+05:30). The database stores timezone-aware instants; only their API representation is converted.
+
+Examples: `GET /api/v1/targets/127.0.0.1/scans?limit=10` or `GET /api/v1/targets/127.0.0.1/scans?limit=5&state=filtered`
 
 ```json
 {
@@ -67,8 +69,8 @@ Example: `GET /api/v1/targets/127.0.0.1/scans?limit=10`
   "scans": [
     {
       "scan_id": 42,
-      "started_at": "2026-11-05T12:00:00Z",
-      "finished_at": "2026-11-05T12:00:18Z",
+      "started_at": "2026-11-05T17:30:00+05:30",
+      "finished_at": "2026-11-05T17:30:18+05:30",
       "status": "completed",
       "resolved_ips": ["127.0.0.1"],
       "ports": [
@@ -86,7 +88,7 @@ Example: `GET /api/v1/targets/127.0.0.1/scans?limit=10`
 }
 ```
 
-The `ports` array contains only observations returned by Nmap. `service` may be `null`; `reason` is omitted if absent. Timestamps are `null` until set. History includes jobs that have not completed, so their observations can be empty. Invalid targets and invalid limits return `400 Bad Request`; database errors return `500 Internal Server Error`.
+The `ports` array contains observations parsed from Nmap XML. When Nmap groups ports in `<extraports>`, the parser expands a port only if `<extrareasons>` gives its exact membership and protocol; aggregate counts alone do not create guessed observations. `service` may be `null`; `reason` is omitted if absent. Timestamps are `null` until set. History includes jobs that have not completed, so their observations can be empty. Invalid targets, limits, and state values return `400 Bad Request`; database errors return `500 Internal Server Error`.
 
 An invalid limit example:
 
@@ -105,10 +107,10 @@ Example: `GET /api/v1/targets/127.0.0.1/changes`
   "target": "127.0.0.1",
   "previous_scan_id": 41,
   "current_scan_id": 42,
-  "previous_started_at": "2026-11-05T11:00:00Z",
-  "previous_finished_at": "2026-11-05T11:00:12Z",
-  "current_started_at": "2026-11-05T12:00:00Z",
-  "current_finished_at": "2026-11-05T12:00:18Z",
+  "previous_started_at": "2026-11-05T16:30:00+05:30",
+  "previous_finished_at": "2026-11-05T16:30:12+05:30",
+  "current_started_at": "2026-11-05T17:30:00+05:30",
+  "current_finished_at": "2026-11-05T17:30:18+05:30",
   "added_ports": [],
   "removed_ports": [],
   "changed_ports": [
@@ -131,7 +133,7 @@ Each `added_ports` or `removed_ports` entry includes `resolved_ip`, `port`, `pro
 {"error":{"code":"NO_COMPARABLE_SCANS","message":"fewer than two comparable completed scans are available"}}
 ```
 
-The comparison includes only IP addresses marked `up` in both selected scans. Nmap states such as `open`, `closed`, `filtered`, and combined states are preserved as reported. A port identity absent from the current output is reported as removed with its previous state; the API does not claim that it is now closed. Missing observations are not reliable proof of a firewall change.
+The changes endpoint does not accept or apply a state filter; it compares all persisted observations, including filtered and combined Nmap states, for IPs marked `up` in both selected scans. Nmap states such as `open`, `closed`, `filtered`, and combined states are preserved as reported. A state change for an identity present in both scans is reported as changed. A port identity absent from the current output is reported as removed with its previous state; the API does not claim that it is now closed. Missing observations are not reliable proof of a firewall change.
 
 ## 5. Target validation and allowlist
 

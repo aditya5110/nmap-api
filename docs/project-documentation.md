@@ -95,9 +95,9 @@ Returns `202 Accepted` when persisted. Errors include `400 Bad Request` for inva
 
 ### `GET /api/v1/targets/{target}/scans`
 
-Returns up to the requested number of recent jobs and their observations, newest first. `limit` is optional and defaults to 20; the valid range is 1–100. A target with no matching history returns `200 OK` with `"scans": []`.
+Returns up to the requested number of recent jobs and their observations, newest first. `limit` is optional and defaults to 20; the valid range is 1–100. The optional `state` parameter accepts `open`, `closed`, `filtered`, or `all`, case-insensitively. Without it, only open and closed observations are included; `state=all` includes all persisted states. Filtering changes only the returned `ports` arrays, not which scan jobs are selected, and scans whose ports are all filtered out remain in the response. Unsupported or repeated state values return `400 Bad Request`. A target with no matching history returns `200 OK` with `"scans": []`. History and changes timestamps are returned in IST (UTC+05:30); PostgreSQL stores the underlying timezone-aware instants.
 
-Example: `GET /api/v1/targets/127.0.0.1/scans?limit=10`
+Examples: `GET /api/v1/targets/127.0.0.1/scans?limit=10` or `GET /api/v1/targets/127.0.0.1/scans?limit=5&state=filtered`
 
 ```json
 {
@@ -105,8 +105,8 @@ Example: `GET /api/v1/targets/127.0.0.1/scans?limit=10`
   "scans": [
     {
       "scan_id": 42,
-      "started_at": "2026-11-05T12:00:00Z",
-      "finished_at": "2026-11-05T12:00:18Z",
+      "started_at": "2026-11-05T17:30:00+05:30",
+      "finished_at": "2026-11-05T17:30:18+05:30",
       "status": "completed",
       "resolved_ips": ["127.0.0.1"],
       "ports": [
@@ -141,10 +141,10 @@ Example response:
   "target": "127.0.0.1",
   "previous_scan_id": 41,
   "current_scan_id": 42,
-  "previous_started_at": "2026-11-05T11:00:00Z",
-  "previous_finished_at": "2026-11-05T11:00:12Z",
-  "current_started_at": "2026-11-05T12:00:00Z",
-  "current_finished_at": "2026-11-05T12:00:18Z",
+  "previous_started_at": "2026-11-05T16:30:00+05:30",
+  "previous_finished_at": "2026-11-05T16:30:12+05:30",
+  "current_started_at": "2026-11-05T17:30:00+05:30",
+  "current_finished_at": "2026-11-05T17:30:18+05:30",
   "added_ports": [],
   "removed_ports": [],
   "changed_ports": [
@@ -173,7 +173,7 @@ Each entry in `added_ports`/`removed_ports` has `resolved_ip`, `port`, `protocol
 - Targets must be an IPv4 address, IPv6 address, or ASCII hostname. Surrounding whitespace is rejected. Hostname labels are 1–63 characters, total hostname length is at most 253, and labels cannot start or end with `-`.
 - Every target must match `SCAN_ALLOWED_TARGETS`. An empty or unset allowlist denies all scan requests. IP addresses are normalized for allowlist comparison; hostnames are lowercased and a trailing dot is ignored for comparison. Wildcards and CIDR entries are not supported.
 - `timeout_seconds` must be between 1 and 120 inclusive. The batch is fully validated before any rows are written; one invalid or disallowed member rejects the whole submission.
-- Common `400` codes are `INVALID_JSON`, `INVALID_REQUEST`, `BATCH_TOO_LARGE`, `INVALID_TIMEOUT`, `INVALID_TARGET`, `TARGET_NOT_ALLOWED`, and `INVALID_LIMIT`.
+- Common `400` codes are `INVALID_JSON`, `INVALID_REQUEST`, `BATCH_TOO_LARGE`, `INVALID_TIMEOUT`, `INVALID_TARGET`, `TARGET_NOT_ALLOWED`, `INVALID_LIMIT`, and `INVALID_STATE`.
 - Unsupported methods return `405 Method Not Allowed` with an `Allow` header. Unknown routes return `404` with `{"error":{"code":"NOT_FOUND","message":"endpoint not found"}}`. Unexpected server errors return a generic `500` JSON message; details are logged rather than sent to clients.
 
 ## 6. End-to-end request flow
@@ -201,7 +201,7 @@ The runner executes Nmap with a fixed argument list, passing the target as its o
 | `-oX -` | Write XML output to standard output. |
 | `<target>` | The IP or hostname submitted for this job. Nmap resolves hostnames during execution. |
 
-XML is used because it is structured and can be parsed without scraping human-readable output. The parser reads run/host timestamps, IPv4/IPv6 addresses, host status, port number, protocol, state, service name, and reason. A hostname can resolve to multiple IPs; the output is represented as observations for the IPs found in Nmap's XML. The parser preserves Nmap state strings, including `open`, `closed`, `filtered`, and combined values such as `open|filtered`; it does not infer a state for a port that is absent from output.
+XML is used because it is structured and can be parsed without scraping human-readable output. The parser reads run/host timestamps, IPv4/IPv6 addresses, host status, port number, protocol, state, service name, and reason. It also expands `<extraports>` observations when nested `<extrareasons>` provides a protocol and an exact port list, using the aggregate state and matching reason. Listed counts are validated, duplicate observations are avoided, and an individual `<port>` entry takes precedence. Aggregate counts without exact membership are not expanded into guessed ports. A hostname can resolve to multiple IPs; the output is represented as observations for the IPs found in Nmap's XML. The parser preserves Nmap state strings, including `open`, `closed`, `filtered`, and combined values such as `open|filtered`; it does not infer a state for a port absent from both individual entries and exact aggregate membership lists.
 
 A malformed target is rejected synchronously with `400`. A valid target that is down or does not respond is a network observation, not automatically an invalid target or process failure. If Nmap exits unsuccessfully or its XML cannot be parsed, the job is `failed`; if the per-scan timeout elapses, it is `timed_out`. A scan whose XML says a host is down may still be a completed scan job with a down host observation. The runner captures stderr separately for diagnostics. Per-scan timeouts are capped at 120 seconds; parent cancellation/deadline is distinguished from the scan timeout.
 
@@ -264,7 +264,7 @@ erDiagram
 - The migration also creates `idx_scan_jobs_request_id`, `idx_scan_jobs_status_created_at`, `idx_scan_jobs_target_value`, and `idx_scan_results_host_ip_finished_at`. Unique constraints on `request_uuid`, `(job_id, host_ip)`, and `(scan_result_id, port, protocol)` create unique indexes. There is no separate migration/version table.
 - The schema restricts request/job statuses to `pending`, `running`, `completed`, `failed`, or `timed_out`; it restricts job target types to `ip` or `hostname` and disallows an empty port state. Other port-state values are preserved as text rather than mapped to a fixed enum.
 
-Recent history includes job status/times and any stored host/port observations. The limit applies to jobs. Changes compare completed scans only when the resolved-IP sets match. The diff keys ports by resolved IP, protocol, and number; it reports state/service changes and additions/removals from the scan output. For comparison, IPs must be `up` in both scans. A port missing in a later scan is not relabeled `closed`; if the IP was up in both scans, the current implementation can report that prior observation as removed, which is not proof of a firewall closure. A down host is excluded from port comparison.
+Recent history includes job status/times and any stored host/port observations. The limit applies to jobs before the `/scans` response state filter. Changes has no state filter and compares all persisted observations, including filtered and combined states, only when the resolved-IP sets match. The diff keys ports by resolved IP, protocol, and number; it reports state/service changes and additions/removals from the scan output. For comparison, IPs must be `up` in both scans. A port missing in a later scan is not relabeled `closed`; if the IP was up in both scans, the current implementation can report that prior observation as removed, which is not proof of a firewall closure. A down host is excluded from port comparison.
 
 ## 9. Concurrency and reliability
 
@@ -327,10 +327,10 @@ To run the API directly, start/configure PostgreSQL, apply the migration, export
 
 The repository has tests for:
 
-- API method handling, JSON responses, accepted batches, target/timeout/batch validation, history limits, and changes.
+- API method handling, JSON responses, accepted batches, target/timeout/batch validation, history limits and state filters, and changes.
 - Configuration parsing and empty/malformed allowlist entries.
 - Nmap argument construction, XML/stderr separation, process failures, timeout, parent cancellation, and parent deadline.
-- XML parsing of multiple IPv4/IPv6 hosts, port states, missing ports, malformed XML/fields, and timestamps, using fixtures under `internal/nmap/testdata`.
+- XML parsing of multiple IPv4/IPv6 hosts, individual and exact-membership aggregate port states, missing ports, malformed XML/fields, and timestamps, using fixtures under `internal/nmap/testdata`.
 - Scan/history service behavior, target matching, and port change semantics (including not synthesizing `closed`).
 - Repository transaction/rollback behavior and SQL expectations using `go-sqlmock`.
 - Worker processing, independent target failures, shutdown cancellation, timeout handling, and periodic recovery.

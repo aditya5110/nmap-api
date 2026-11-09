@@ -49,11 +49,14 @@ curl -X POST http://localhost:8080/api/v1/scans \
 
 ### Retrieve recent scans
 
-`GET /api/v1/targets/{target}/scans` returns the newest scans first. The optional `limit` is between 1 and 100; it defaults to 20.
+`GET /api/v1/targets/{target}/scans` returns the newest scans first. The optional `limit` is between 1 and 100; it defaults to 20. The optional `state` filter accepts `open`, `closed`, `filtered`, or `all` (case-insensitive). If omitted, only open and closed port observations are returned; scans remain in the response even when no ports match the filter.
+Timestamp fields in API responses use Indian Standard Time (IST, UTC+05:30); PostgreSQL continues to store timezone-aware timestamps.
 
 ```bash
 curl 'http://localhost:8080/api/v1/targets/127.0.0.1/scans?limit=10'
 ```
+
+For example, use `?limit=5&state=filtered` to show only filtered ports, or `?state=all` to include every persisted port state. The state filter affects only the returned port list; it does not change which recent scans are selected or what is stored in PostgreSQL.
 
 Example response:
 
@@ -63,8 +66,8 @@ Example response:
 	"scans": [
 		{
 			"scan_id": 42,
-			"started_at": "2026-11-05T12:00:00Z",
-			"finished_at": "2026-11-05T12:00:18Z",
+			"started_at": "2026-11-05T17:30:00+05:30",
+			"finished_at": "2026-11-05T17:30:18+05:30",
 			"status": "completed",
 			"resolved_ips": ["127.0.0.1"],
 			"ports": [
@@ -79,7 +82,7 @@ No matching history returns `200 OK` with an empty `scans` array.
 
 ### Compare recent scans
 
-`GET /api/v1/targets/{target}/changes` compares the two most recent completed scans that resolved to the same IP-address set. Port identity includes resolved IP, protocol, and port number. A missing observation is not converted into a `closed` state; removed-port entries retain the prior observed state.
+`GET /api/v1/targets/{target}/changes` compares the two most recent completed scans that resolved to the same IP-address set, using all persisted port states; it has no `state` filter. Port identity includes resolved IP, protocol, and port number. A missing observation is not converted into a `closed` state; removed-port entries retain the prior observed state.
 
 ```bash
 curl 'http://localhost:8080/api/v1/targets/127.0.0.1/changes'
@@ -92,10 +95,10 @@ Example response:
 	"target": "127.0.0.1",
 	"previous_scan_id": 41,
 	"current_scan_id": 42,
-	"previous_started_at": "2026-11-05T11:00:00Z",
-	"previous_finished_at": "2026-11-05T11:00:12Z",
-	"current_started_at": "2026-11-05T12:00:00Z",
-	"current_finished_at": "2026-11-05T12:00:18Z",
+	"previous_started_at": "2026-11-05T16:30:00+05:30",
+	"previous_finished_at": "2026-11-05T16:30:12+05:30",
+	"current_started_at": "2026-11-05T17:30:00+05:30",
+	"current_finished_at": "2026-11-05T17:30:18+05:30",
 	"added_ports": [],
 	"removed_ports": [],
 	"changed_ports": [
@@ -149,7 +152,7 @@ A successful request returns `202 Accepted` after the scan request and job are s
 - **Method:** `GET`
 - **URL:** `http://localhost:8080/api/v1/targets/127.0.0.1/scans?limit=10`
 
-The optional `limit` query parameter controls how many recent scans are returned. It defaults to `20` when omitted and must be between `1` and `100`.
+The optional `limit` query parameter controls how many recent scans are returned. It defaults to `20` when omitted and must be between `1` and `100`. The optional `state` parameter accepts `open`, `closed`, `filtered`, or `all`; when omitted, only open and closed ports are returned.
 
 ```json
 {
@@ -157,8 +160,8 @@ The optional `limit` query parameter controls how many recent scans are returned
 	"scans": [
 		{
 			"scan_id": 42,
-			"started_at": "2026-11-05T12:00:00Z",
-			"finished_at": "2026-11-05T12:00:18Z",
+			"started_at": "2026-11-05T17:30:00+05:30",
+			"finished_at": "2026-11-05T17:30:18+05:30",
 			"status": "completed",
 			"resolved_ips": ["127.0.0.1"],
 			"ports": [
@@ -183,10 +186,10 @@ This compares the two most recent comparable completed scans, which must have re
 	"target": "127.0.0.1",
 	"previous_scan_id": 41,
 	"current_scan_id": 42,
-	"previous_started_at": "2026-11-05T11:00:00Z",
-	"previous_finished_at": "2026-11-05T11:00:12Z",
-	"current_started_at": "2026-11-05T12:00:00Z",
-	"current_finished_at": "2026-11-05T12:00:18Z",
+	"previous_started_at": "2026-11-05T16:30:00+05:30",
+	"previous_finished_at": "2026-11-05T16:30:12+05:30",
+	"current_started_at": "2026-11-05T17:30:00+05:30",
+	"current_finished_at": "2026-11-05T17:30:18+05:30",
 	"added_ports": [],
 	"removed_ports": [],
 	"changed_ports": [

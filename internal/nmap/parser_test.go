@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestParseXML_MultipleHostsAndPortStates verifies parsing of multiple resolved hosts and their port observations.
+// TestParseXML_MultipleHostsAndPortStates verifies IPv4/IPv6 host results retain timestamps, service metadata, and open, closed, filtered, and combined states.
 func TestParseXML_MultipleHostsAndPortStates(t *testing.T) {
 	data := readFixture(t, "multi_host.xml")
 	result, err := ParseXML("scanme.example", data)
@@ -78,7 +78,49 @@ func TestParseXML_MultipleHostsAndPortStates(t *testing.T) {
 	}
 }
 
-// TestParseXML_HostWithNoPorts verifies a host without port entries produces an empty port list.
+// TestParseXML_ExpandsExtraportsWithExactMembership verifies listed aggregate ports retain their Nmap state and reason while unmapped counts create no observations.
+func TestParseXML_ExpandsExtraportsWithExactMembership(t *testing.T) {
+	result, err := ParseXML("aggregate.example", readFixture(t, "extraports.xml"))
+	if err != nil {
+		t.Fatalf("ParseXML returned error: %v", err)
+	}
+	if len(result.Hosts) != 1 {
+		t.Fatalf("expected one host, got %d", len(result.Hosts))
+	}
+
+	ports := make(map[int]Port, len(result.Hosts[0].Ports))
+	for _, port := range result.Hosts[0].Ports {
+		if _, exists := ports[port.Number]; exists {
+			t.Fatalf("port %d was returned more than once", port.Number)
+		}
+		ports[port.Number] = port
+	}
+	want := map[int]struct {
+		state  string
+		reason string
+	}{
+		22:   {state: "open", reason: "syn-ack"},
+		80:   {state: "closed", reason: "reset"},
+		443:  {state: "closed", reason: "reset"},
+		8080: {state: "filtered", reason: "no-response"},
+		8081: {state: "filtered", reason: "no-response"},
+		8082: {state: "filtered", reason: "admin-prohibited"},
+	}
+	if len(ports) != len(want) {
+		t.Fatalf("got %d port observations, want %d: %#v", len(ports), len(want), ports)
+	}
+	for number, expected := range want {
+		port, exists := ports[number]
+		if !exists {
+			t.Fatalf("expected observation for port %d", number)
+		}
+		if port.State != expected.state || port.Reason == nil || *port.Reason != expected.reason {
+			t.Errorf("port %d = state %q reason %v, want state %q reason %q", number, port.State, port.Reason, expected.state, expected.reason)
+		}
+	}
+}
+
+// TestParseXML_HostWithNoPorts verifies a host without port entries has an empty port list and keeps absent host timestamps nil.
 func TestParseXML_HostWithNoPorts(t *testing.T) {
 	result, err := ParseXML("198.51.100.25", readFixture(t, "no_ports.xml"))
 	if err != nil {
@@ -95,7 +137,7 @@ func TestParseXML_HostWithNoPorts(t *testing.T) {
 	}
 }
 
-// TestParseXML_MalformedDocument verifies malformed Nmap XML is reported as a parse error.
+// TestParseXML_MalformedDocument verifies truncated Nmap XML returns a document decoding error.
 func TestParseXML_MalformedDocument(t *testing.T) {
 	_, err := ParseXML("example.test", []byte(`<nmaprun><host>`))
 	if err == nil || !strings.Contains(err.Error(), "decode Nmap XML") {
@@ -103,7 +145,7 @@ func TestParseXML_MalformedDocument(t *testing.T) {
 	}
 }
 
-// TestParseXML_RejectsUnusableHost verifies host records without usable IP addresses are rejected.
+// TestParseXML_RejectsUnusableHost verifies a hostname-only XML address is rejected because results require an IPv4 or IPv6 address.
 func TestParseXML_RejectsUnusableHost(t *testing.T) {
 	data := []byte(`<nmaprun><host><status state="up"/><address addr="host.example" addrtype="hostname"/></host></nmaprun>`)
 	_, err := ParseXML("host.example", data)
@@ -112,7 +154,7 @@ func TestParseXML_RejectsUnusableHost(t *testing.T) {
 	}
 }
 
-// TestParseXML_RejectsInvalidPortAndTimestamp verifies invalid port fields and timestamps are rejected.
+// TestParseXML_RejectsInvalidPortAndTimestamp verifies a port missing its state and a nonnumeric scan timestamp both fail parsing.
 func TestParseXML_RejectsInvalidPortAndTimestamp(t *testing.T) {
 	tests := []struct {
 		name string

@@ -17,7 +17,7 @@ import (
 
 const validScanXML = `<nmaprun start="1700000000"><host starttime="1700000000" endtime="1700000002"><status state="up"/><address addr="192.0.2.50" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open" reason="syn-ack"/><service name="http"/></port></ports></host><runstats><finished time="1700000002"/></runstats></nmaprun>`
 
-// TestProcessorSuccessfulScan verifies parsed host and port observations are stored for a completed scan.
+// TestProcessorSuccessfulScan verifies fake Nmap XML marks the job completed and stores its resolved host and open HTTP port.
 func TestProcessorSuccessfulScan(t *testing.T) {
 	repo := newTestRepository(testJob(1, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second)
@@ -42,7 +42,32 @@ func TestProcessorSuccessfulScan(t *testing.T) {
 	}
 }
 
-// TestProcessorNmapFailureIsFailed verifies an unsuccessful Nmap process marks its job failed with diagnostics.
+// TestProcessorPersistsExpandedExtraports verifies an aggregate filtered observation reaches the repository with its port, state, and reason intact.
+func TestProcessorPersistsExpandedExtraports(t *testing.T) {
+	xmlData, err := os.ReadFile(filepath.Join("..", "nmap", "testdata", "extraports.xml"))
+	if err != nil {
+		t.Fatalf("read aggregate XML fixture: %v", err)
+	}
+	repo := newTestRepository(testJob(10, "aggregate.example", 60))
+	processor := newTestProcessor(t, repo, "printf '%s' "+shellQuote(string(xmlData))+"\n", 60*time.Second)
+	job := claimJob(t, repo)
+
+	if err := processor.process(context.Background(), job); err != nil {
+		t.Fatalf("process aggregate scan: %v", err)
+	}
+
+	for _, port := range repo.ports[0] {
+		if port.Port == 8080 {
+			if port.Protocol != "tcp" || port.State != "filtered" || port.Reason == nil || *port.Reason != "no-response" {
+				t.Fatalf("unexpected persisted observation for port 8080: %#v", port)
+			}
+			return
+		}
+	}
+	t.Fatal("expected aggregate XML port 8080 to reach the repository")
+}
+
+// TestProcessorNmapFailureIsFailed verifies a fake Nmap exit failure marks the job failed and preserves stderr in its error details.
 func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	repo := newTestRepository(testJob(2, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf 'connection failed' >&2\nexit 7\n", 60*time.Second)
@@ -58,7 +83,7 @@ func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	}
 }
 
-// TestProcessorNmapTimeoutIsTimedOut verifies a scan timeout gives the job a timed-out status.
+// TestProcessorNmapTimeoutIsTimedOut verifies a fake scan exceeding its one-second limit leaves the job timed_out.
 func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	repo := newTestRepository(testJob(3, "example.test", 1))
 	processor := newTestProcessor(t, repo, "exec /bin/sleep 5\n", time.Second)
@@ -73,7 +98,7 @@ func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	}
 }
 
-// TestProcessorXMLParsingFailureIsFailed verifies invalid Nmap XML fails the job without storing results.
+// TestProcessorXMLParsingFailureIsFailed verifies a successful process with a non-Nmap XML document fails the job without results.
 func TestProcessorXMLParsingFailureIsFailed(t *testing.T) {
 	repo := newTestRepository(testJob(4, "example.test", 60))
 	processor := newTestProcessor(t, repo, "printf '%s' '<not-nmap/>\n'\n", 60*time.Second)
@@ -90,7 +115,7 @@ func TestProcessorXMLParsingFailureIsFailed(t *testing.T) {
 	}
 }
 
-// TestProcessorPersistenceFailureMarksJobFailed verifies a result storage error marks the job failed.
+// TestProcessorPersistenceFailureMarksJobFailed verifies a simulated database write error marks the claimed job failed.
 func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	repo := newTestRepository(testJob(5, "example.test", 60))
 	repo.completeErr = errors.New("database unavailable")
@@ -105,7 +130,7 @@ func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	}
 }
 
-// TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum verifies job timeouts are capped at the supported maximum.
+// TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum verifies an oversized job timeout passed to the runner is capped at 120 seconds.
 func TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum(t *testing.T) {
 	repo := newTestRepository(testJob(6, "example.test", 999))
 	runner := &recordingRunner{output: nmap.RunOutput{XML: []byte(validScanXML)}}
@@ -123,7 +148,7 @@ func TestProcessorUsesJobTimeoutAndCapsAtMVPMaximum(t *testing.T) {
 	}
 }
 
-// TestProcessorShutdownCancellationLeavesClaimRecoverable verifies shutdown cancellation leaves a running job leased for recovery.
+// TestProcessorShutdownCancellationLeavesClaimRecoverable verifies canceling a worker during a fake scan leaves its running job leased without marking it failed.
 func TestProcessorShutdownCancellationLeavesClaimRecoverable(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	repo := newTestRepository(testJob(7, "example.test", 120))
@@ -156,7 +181,7 @@ func TestProcessorShutdownCancellationLeavesClaimRecoverable(t *testing.T) {
 	}
 }
 
-// TestPoolContinuesAfterOrdinaryJobFailure verifies a failed job does not prevent the worker from processing another job.
+// TestPoolContinuesAfterOrdinaryJobFailure verifies one fake Nmap failure is recorded while the same worker completes the next job.
 func TestPoolContinuesAfterOrdinaryJobFailure(t *testing.T) {
 	repo := newTestRepository(
 		testJob(8, "bad.example", 60),
@@ -194,7 +219,7 @@ func TestPoolContinuesAfterOrdinaryJobFailure(t *testing.T) {
 	}
 }
 
-// TestPoolCoordinatesPeriodicLeaseRecovery verifies one recovery loop periodically checks expired jobs.
+// TestPoolCoordinatesPeriodicLeaseRecovery verifies the pool's single recovery loop makes repeated recovery calls until canceled.
 func TestPoolCoordinatesPeriodicLeaseRecovery(t *testing.T) {
 	repo := newTestRepository()
 	processor, err := NewProcessor(repo, &recordingRunner{}, time.Minute)
@@ -228,7 +253,7 @@ func TestPoolCoordinatesPeriodicLeaseRecovery(t *testing.T) {
 	}
 }
 
-// TestNewPoolRequiresPositiveWorkerCount verifies a pool cannot be created with zero workers.
+// TestNewPoolRequiresPositiveWorkerCount verifies pool construction rejects zero workers instead of starting no scan processors.
 func TestNewPoolRequiresPositiveWorkerCount(t *testing.T) {
 	repo := newTestRepository()
 	processor, err := NewProcessor(repo, &recordingRunner{}, time.Minute)

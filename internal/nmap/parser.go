@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,11 +25,12 @@ type xmlFinished struct {
 }
 
 type xmlHost struct {
-	StartTime *string      `xml:"starttime,attr"`
-	EndTime   *string      `xml:"endtime,attr"`
-	Status    *xmlStatus   `xml:"status"`
-	Addresses []xmlAddress `xml:"address"`
-	Ports     []xmlPort    `xml:"ports>port"`
+	StartTime  *string         `xml:"starttime,attr"`
+	EndTime    *string         `xml:"endtime,attr"`
+	Status     *xmlStatus      `xml:"status"`
+	Addresses  []xmlAddress    `xml:"address"`
+	Ports      []xmlPort       `xml:"ports>port"`
+	ExtraPorts []xmlExtraPorts `xml:"ports>extraports"`
 }
 
 type xmlStatus struct {
@@ -54,6 +56,19 @@ type xmlPortState struct {
 
 type xmlService struct {
 	Name *string `xml:"name,attr"`
+}
+
+type xmlExtraPorts struct {
+	State   *string          `xml:"state,attr"`
+	Count   *string          `xml:"count,attr"`
+	Reasons []xmlExtraReason `xml:"extrareasons"`
+}
+
+type xmlExtraReason struct {
+	Reason   *string `xml:"reason,attr"`
+	Count    *string `xml:"count,attr"`
+	Protocol *string `xml:"proto,attr"`
+	Ports    *string `xml:"ports,attr"`
 }
 
 // ParseXML parses one Nmap XML document for the requested target.
@@ -165,12 +180,86 @@ func parseHost(host xmlHost, hostIndex int) (parsedHost, error) {
 	}
 
 	ports := make([]Port, 0, len(host.Ports))
+	portIndexes := make(map[portIdentity]int, len(host.Ports))
+	explicitPorts := make(map[portIdentity]struct{}, len(host.Ports))
 	for portIndex, xmlPort := range host.Ports {
 		port, err := parsePort(xmlPort, hostIndex, portIndex+1)
 		if err != nil {
 			return parsedHost{}, err
 		}
+		identity := portIdentity{Protocol: port.Protocol, Number: port.Number}
+		if _, exists := portIndexes[identity]; exists {
+			continue
+		}
+		portIndexes[identity] = len(ports)
+		explicitPorts[identity] = struct{}{}
 		ports = append(ports, port)
+	}
+
+	for extraIndex, extra := range host.ExtraPorts {
+		if extra.State == nil || *extra.State == "" {
+			continue
+		}
+		reasonCounts := 0
+		allReasonsMapped := len(extra.Reasons) > 0
+		for reasonIndex, xmlReason := range extra.Reasons {
+			if xmlReason.Ports == nil || *xmlReason.Ports == "" || xmlReason.Protocol == nil || *xmlReason.Protocol == "" {
+				allReasonsMapped = false
+				continue
+			}
+			field := fmt.Sprintf("Nmap host %d extraports %d reason %d", hostIndex, extraIndex+1, reasonIndex+1)
+			portNumbers, err := parsePortList(*xmlReason.Ports, field)
+			if err != nil {
+				return parsedHost{}, err
+			}
+			if xmlReason.Count != nil {
+				count, err := parsePortCount(*xmlReason.Count, field)
+				if err != nil {
+					return parsedHost{}, err
+				}
+				if count != len(portNumbers) {
+					return parsedHost{}, fmt.Errorf("%s count does not match its listed ports", field)
+				}
+				reasonCounts += count
+			} else {
+				allReasonsMapped = false
+			}
+
+			for _, number := range portNumbers {
+				identity := portIdentity{Protocol: *xmlReason.Protocol, Number: number}
+				if existingIndex, exists := portIndexes[identity]; exists {
+					// An individual <port> entry is more specific than an aggregate.
+					if _, explicit := explicitPorts[identity]; explicit {
+						continue
+					}
+					existing := ports[existingIndex]
+					if existing.State != *extra.State || !equalOptionalString(existing.Reason, xmlReason.Reason) {
+						return parsedHost{}, fmt.Errorf("%s duplicates a port with conflicting aggregate state", field)
+					}
+					continue
+				}
+				var reason *string
+				if xmlReason.Reason != nil {
+					reason = xmlReason.Reason
+				}
+				portIndexes[identity] = len(ports)
+				ports = append(ports, Port{
+					Number:   number,
+					Protocol: *xmlReason.Protocol,
+					State:    *extra.State,
+					Reason:   reason,
+				})
+			}
+		}
+		if allReasonsMapped && extra.Count != nil {
+			count, err := parsePortCount(*extra.Count, fmt.Sprintf("Nmap host %d extraports %d", hostIndex, extraIndex+1))
+			if err != nil {
+				return parsedHost{}, err
+			}
+			if count != reasonCounts {
+				return parsedHost{}, fmt.Errorf("Nmap host %d extraports %d count does not match its reason counts", hostIndex, extraIndex+1)
+			}
+		}
 	}
 
 	return parsedHost{
@@ -214,6 +303,71 @@ func parsePort(port xmlPort, hostIndex, portIndex int) (Port, error) {
 		ServiceName: serviceName,
 		Reason:      reason,
 	}, nil
+}
+
+type portIdentity struct {
+	Protocol string
+	Number   int
+}
+
+func parsePortList(value, field string) ([]int, error) {
+	numbers := make([]int, 0)
+	seen := make(map[int]struct{})
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return nil, fmt.Errorf("%s contains an empty port range", field)
+		}
+		bounds := strings.Split(item, "-")
+		if len(bounds) > 2 {
+			return nil, fmt.Errorf("%s contains an invalid port range %q", field, item)
+		}
+		first, err := parsePortNumber(bounds[0], field)
+		if err != nil {
+			return nil, err
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = parsePortNumber(bounds[1], field)
+			if err != nil {
+				return nil, err
+			}
+			if first > last {
+				return nil, fmt.Errorf("%s contains a descending port range %q", field, item)
+			}
+		}
+		for number := first; number <= last; number++ {
+			if _, exists := seen[number]; exists {
+				return nil, fmt.Errorf("%s lists port %d more than once", field, number)
+			}
+			seen[number] = struct{}{}
+			numbers = append(numbers, number)
+		}
+	}
+	return numbers, nil
+}
+
+func parsePortNumber(value, field string) (int, error) {
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 0 || number > 65535 {
+		return 0, fmt.Errorf("%s contains an invalid port number %q", field, value)
+	}
+	return number, nil
+}
+
+func parsePortCount(value, field string) (int, error) {
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 0 {
+		return 0, fmt.Errorf("%s contains an invalid count %q", field, value)
+	}
+	return count, nil
+}
+
+func equalOptionalString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func parseTimestamp(value *string, field string) (*time.Time, error) {

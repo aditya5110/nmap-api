@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<nmaprun start="1700000200">
+  <host starttime="1700000200" endtime="1700000205">
+    <status state="up" />
+    <address addr="192.0.2.80" addrtype="ipv4" />
+    <ports>
+      <extraports state="filtered" count="3">
+        <extrareasons reason="no-response" count="2" proto="tcp" ports="8080-8081" />
+        <extrareasons reason="admin-prohibited" count="1" proto="tcp" ports="8082" />
+      </extraports>
+      <extraports state="closed" count="2">
+        <extrareasons reason="reset" count="2" proto="tcp" ports="80,443" />
+      </extraports>
+      <extraports state="filtered" count="1">
+        <extrareasons reason="no-response" count="1" proto="tcp" />
+      </extraports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack" />
+        <service name="ssh" />
+      </port>
+    </ports>
+  </host>
+  <runstats>
+    <finished time="1700000205" />
+  </runstats>
+</nmaprun>

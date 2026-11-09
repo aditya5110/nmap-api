@@ -12,9 +12,12 @@ import (
 const (
 	DefaultHistoryLimit = 20
 	MaxHistoryLimit     = 100
+	indiaStandardOffset = 5*60*60 + 30*60
 )
 
 var ErrNoComparableScans = errors.New("no comparable completed scans found")
+
+var indiaStandardTime = time.FixedZone("IST", indiaStandardOffset)
 
 type HistoryRepository interface {
 	GetScanHistory(context.Context, string, int) ([]domain.ScanHistory, error)
@@ -81,6 +84,10 @@ func (s *HistoryService) History(ctx context.Context, target string, limit int) 
 	if scans == nil {
 		scans = make([]domain.ScanHistory, 0)
 	}
+	for i := range scans {
+		scans[i].StartedAt = inIndiaStandardTime(scans[i].StartedAt)
+		scans[i].FinishedAt = inIndiaStandardTime(scans[i].FinishedAt)
+	}
 	return HistoryResponse{Target: target, Scans: scans}, nil
 }
 
@@ -126,10 +133,10 @@ func (s *HistoryService) Changes(ctx context.Context, target string) (ChangesRes
 		Target:             target,
 		PreviousScanID:     previous.ScanID,
 		CurrentScanID:      current.ScanID,
-		PreviousStartedAt:  previous.StartedAt,
-		PreviousFinishedAt: previous.FinishedAt,
-		CurrentStartedAt:   current.StartedAt,
-		CurrentFinishedAt:  current.FinishedAt,
+		PreviousStartedAt:  inIndiaStandardTime(previous.StartedAt),
+		PreviousFinishedAt: inIndiaStandardTime(previous.FinishedAt),
+		CurrentStartedAt:   inIndiaStandardTime(current.StartedAt),
+		CurrentFinishedAt:  inIndiaStandardTime(current.FinishedAt),
 		AddedPorts:         make([]PortChange, 0),
 		RemovedPorts:       make([]PortChange, 0),
 		ChangedPorts:       make([]ChangedPort, 0),
@@ -155,6 +162,14 @@ func (s *HistoryService) Changes(ctx context.Context, target string) (ChangesRes
 		}
 	}
 	return response, nil
+}
+
+func inIndiaStandardTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	converted := value.In(indiaStandardTime)
+	return &converted
 }
 
 type portIdentity struct {

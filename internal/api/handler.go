@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nmap-api/internal/domain"
 	"nmap-api/internal/service"
 )
 
@@ -95,11 +96,17 @@ func NewHandler(scanService *service.ScanService, historyService *service.Histor
 				writeValidationError(w, err)
 				return
 			}
+			state, err := parseHistoryState(r)
+			if err != nil {
+				writeValidationError(w, err)
+				return
+			}
 			response, err := historyService.History(r.Context(), target, limit)
 			if err != nil {
 				writeServiceError(w, err)
 				return
 			}
+			filterHistoryPorts(&response, state)
 			writeJSON(w, http.StatusOK, response)
 		case "changes":
 			response, err := historyService.Changes(r.Context(), target)
@@ -146,6 +153,40 @@ func parseHistoryLimit(r *http.Request) (int, error) {
 		return 0, &service.ValidationError{Code: "INVALID_LIMIT", Message: "limit must be between 1 and 100"}
 	}
 	return limit, nil
+}
+
+func parseHistoryState(r *http.Request) (string, error) {
+	values, present := r.URL.Query()["state"]
+	if !present {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", &service.ValidationError{Code: "INVALID_STATE", Message: "state must be specified once"}
+	}
+	state := strings.ToLower(values[0])
+	switch state {
+	case "open", "closed", "filtered", "all":
+		return state, nil
+	default:
+		return "", &service.ValidationError{Code: "INVALID_STATE", Message: "state must be one of open, closed, filtered, or all"}
+	}
+}
+
+func filterHistoryPorts(response *service.HistoryResponse, state string) {
+	scans := make([]domain.ScanHistory, len(response.Scans))
+	copy(scans, response.Scans)
+	response.Scans = scans
+	for scanIndex := range response.Scans {
+		ports := response.Scans[scanIndex].Ports
+		filtered := make([]domain.ObservedScanPort, 0, len(ports))
+		for _, port := range ports {
+			include := state == "all" || (state == "" && (port.State == "open" || port.State == "closed")) || port.State == state
+			if include {
+				filtered = append(filtered, port)
+			}
+		}
+		response.Scans[scanIndex].Ports = filtered
+	}
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {

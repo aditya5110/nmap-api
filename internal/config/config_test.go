@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestLoadRejectsEmptyScanAllowedTargetsEntries verifies empty entries in the target allowlist are rejected.
+// TestLoadRejectsEmptyScanAllowedTargetsEntries verifies leading, trailing, or repeated commas make SCAN_ALLOWED_TARGETS invalid.
 func TestLoadRejectsEmptyScanAllowedTargetsEntries(t *testing.T) {
 	values := []string{
 		",127.0.0.1",
@@ -25,7 +25,7 @@ func TestLoadRejectsEmptyScanAllowedTargetsEntries(t *testing.T) {
 	}
 }
 
-// TestLoadAllowsEmptyOrUnsetScanAllowedTargets verifies an empty or unset allowlist loads as empty.
+// TestLoadAllowsEmptyOrUnsetScanAllowedTargets verifies an empty or unset allowlist loads with no entries, enabling default-deny scans.
 func TestLoadAllowsEmptyOrUnsetScanAllowedTargets(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// TestNewRunnerDefaultsBinaryAndValidatesTimeout verifies the default executable and positive timeout requirement.
+// TestNewRunnerDefaultsBinaryAndValidatesTimeout verifies an empty binary path defaults to nmap and a zero timeout is rejected.
 func TestNewRunnerDefaultsBinaryAndValidatesTimeout(t *testing.T) {
 	runner, err := NewRunner("", time.Second)
 	if err != nil {
@@ -26,7 +26,7 @@ func TestNewRunnerDefaultsBinaryAndValidatesTimeout(t *testing.T) {
 	}
 }
 
-// TestRunnerRunPassesArgumentsAndCapturesOutputSeparately verifies the scan arguments and separate XML and diagnostic output.
+// TestRunnerRunPassesArgumentsAndCapturesOutputSeparately verifies the fixed TCP profile reaches the fake process and XML stdout stays separate from stderr.
 func TestRunnerRunPassesArgumentsAndCapturesOutputSeparately(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args.txt")
@@ -60,7 +60,7 @@ func TestRunnerRunPassesArgumentsAndCapturesOutputSeparately(t *testing.T) {
 	}
 }
 
-// TestRunnerRunReportsExecutionFailure verifies a failed Nmap process reports its exit code and stderr.
+// TestRunnerRunReportsExecutionFailure verifies a process exiting with code 7 returns an execution error while preserving stderr diagnostics.
 func TestRunnerRunReportsExecutionFailure(t *testing.T) {
 	runner := newTestRunner(t, "printf 'nmap diagnostic' >&2\nexit 7\n", time.Second)
 
@@ -77,7 +77,7 @@ func TestRunnerRunReportsExecutionFailure(t *testing.T) {
 	}
 }
 
-// TestRunnerRunDistinguishesConfiguredTimeout verifies an expired scan timeout is distinct from parent context termination.
+// TestRunnerRunDistinguishesConfiguredTimeout verifies the runner's own deadline returns ErrScanTimeout rather than a parent-context error.
 func TestRunnerRunDistinguishesConfiguredTimeout(t *testing.T) {
 	runner := newTestRunner(t, "exec /bin/sleep 5\n", 50*time.Millisecond)
 
@@ -90,7 +90,7 @@ func TestRunnerRunDistinguishesConfiguredTimeout(t *testing.T) {
 	}
 }
 
-// TestRunnerRunWithTimeoutUsesPerScanTimeout verifies the per-scan timeout stops a long-running process.
+// TestRunnerRunWithTimeoutUsesPerScanTimeout verifies a shorter per-call timeout stops the fake process and returns ErrScanTimeout.
 func TestRunnerRunWithTimeoutUsesPerScanTimeout(t *testing.T) {
 	runner := newTestRunner(t, "exec /bin/sleep 5\n", 5*time.Second)
 
@@ -100,7 +100,7 @@ func TestRunnerRunWithTimeoutUsesPerScanTimeout(t *testing.T) {
 	}
 }
 
-// TestRunnerRunDistinguishesParentCancellation verifies parent cancellation is reported separately from scan timeout.
+// TestRunnerRunDistinguishesParentCancellation verifies canceling the parent context stops the process and reports cancellation, not scan timeout.
 func TestRunnerRunDistinguishesParentCancellation(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	runner := newTestRunner(t, fmt.Sprintf(": > %s\nexec /bin/sleep 5\n", shellQuote(marker)), 5*time.Second)
@@ -116,7 +116,7 @@ func TestRunnerRunDistinguishesParentCancellation(t *testing.T) {
 	waitForMarkerAndCancel(t, marker, cancel, errCh)
 }
 
-// TestRunnerRunDistinguishesParentDeadline verifies a parent deadline is not classified as a scan timeout.
+// TestRunnerRunDistinguishesParentDeadline verifies an earlier parent deadline returns a parent-deadline error instead of ErrScanTimeout.
 func TestRunnerRunDistinguishesParentDeadline(t *testing.T) {
 	runner := newTestRunner(t, "exec /bin/sleep 5\n", 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
@@ -131,7 +131,7 @@ func TestRunnerRunDistinguishesParentDeadline(t *testing.T) {
 	}
 }
 
-// TestRunnerRunRejectsEmptyTarget verifies the runner rejects an empty target.
+// TestRunnerRunRejectsEmptyTarget verifies Run returns an error when given an empty target.
 func TestRunnerRunRejectsEmptyTarget(t *testing.T) {
 	runner := newTestRunner(t, "exit 0\n", time.Second)
 	if _, err := runner.Run(context.Background(), ""); err == nil {
