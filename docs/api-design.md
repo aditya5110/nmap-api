@@ -10,7 +10,11 @@ One submitted target creates one logical job. If Nmap returns multiple distinct 
 - `GET /api/v1/targets/{target}/scans`
 - `GET /api/v1/targets/{target}/changes`
 
-All responses use JSON. Unsupported methods return `405 Method Not Allowed` with an `Allow` header. Unknown paths return `404 Not Found`.
+REST API responses use JSON. `GET /metrics` is an additional Prometheus exposition endpoint and returns metrics text, not JSON. Unsupported methods on REST endpoints return `405 Method Not Allowed` with an `Allow` header. Unknown paths return `404 Not Found`.
+
+## Prometheus metrics — `GET /metrics`
+
+The API exposes Prometheus exposition data at `/metrics`. Prometheus scrapes this endpoint from `api:8080` in Docker Compose. Scrapes are excluded from the application's HTTP request metrics. The endpoint is not part of the JSON REST contract.
 
 ## 2. Submit scans — `POST /api/v1/scans`
 
@@ -160,7 +164,7 @@ Implemented status behavior:
 
 - `200 OK`: history or changes returned successfully. Empty history is an empty array.
 - `202 Accepted`: request and target jobs have been persisted; scanning is asynchronous.
-- `400 Bad Request`: invalid JSON, target, timeout, batch size, allowlist membership, or history limit.
+- `400 Bad Request`: invalid JSON, target, timeout, batch size, allowlist membership, history limit, or unsupported/repeated history state.
 - `404 Not Found`: unknown endpoint or fewer than two comparable completed scans for changes.
 - `405 Method Not Allowed`: method is unsupported for a known endpoint; `Allow` indicates the supported method.
 - `500 Internal Server Error`: unexpected persistence/read failure; response is generic and details are logged.
@@ -173,4 +177,4 @@ The API validates every member of the batch and transactionally stores the reque
 
 ## 8. Scope and non-features
 
-The current API does not provide a request-status endpoint, scan-profile selection, UDP scanning, custom port ranges, authentication, rate limiting, metrics endpoints, or a distributed queue. The API does not inspect or change firewall rules. Nmap results are observations from the scanner's network location using the fixed top-1,000 TCP port profile.
+The current API does not provide a request-status endpoint, scan-profile selection, UDP scanning, custom port ranges, authentication, rate limiting, or a distributed queue. The API does not inspect or change firewall rules. Nmap results are observations from the scanner's network location using the fixed top-1,000 TCP port profile.

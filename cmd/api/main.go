@@ -15,6 +15,7 @@ import (
 	"nmap-api/internal/api"
 	"nmap-api/internal/config"
 	"nmap-api/internal/db"
+	"nmap-api/internal/metrics"
 	"nmap-api/internal/nmap"
 	"nmap-api/internal/service"
 	"nmap-api/internal/worker"
@@ -42,6 +43,7 @@ func run() error {
 	defer database.Close()
 
 	repository := db.NewRepository(database)
+	appMetrics := metrics.New()
 	scanService, err := service.NewScanService(repository, cfg.MaxBatchSize, cfg.DefaultTimeoutSeconds, cfg.ScanAllowedTargets)
 	if err != nil {
 		return fmt.Errorf("configure scan service: %w", err)
@@ -51,7 +53,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure Nmap runner: %w", err)
 	}
-	processor, err := worker.NewProcessor(repository, nmapRunner, time.Duration(cfg.DefaultTimeoutSeconds)*time.Second)
+	processor, err := worker.NewProcessorWithMetrics(repository, nmapRunner, time.Duration(cfg.DefaultTimeoutSeconds)*time.Second, appMetrics)
 	if err != nil {
 		return fmt.Errorf("configure scan processor: %w", err)
 	}
@@ -62,7 +64,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              cfg.APIAddr(),
-		Handler:           api.NewHandler(scanService, historyService),
+		Handler:           appMetrics.HTTPHandler(api.NewHandler(scanService, historyService)),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

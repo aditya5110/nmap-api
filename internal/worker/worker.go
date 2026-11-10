@@ -16,7 +16,7 @@ const MaxScanTimeout = 120 * time.Second
 
 type repository interface {
 	ClaimNextJob(context.Context, time.Duration) (*domain.ScanJob, error)
-	RecoverExpiredJobs(context.Context) (int64, error)
+	RecoverExpiredJobs(context.Context) (db.LeaseRecoveryResult, error)
 	UpdateClaimedJobStatus(context.Context, domain.ScanJob, string, time.Time, *string) (bool, error)
 	CompleteJobWithResults(context.Context, domain.ScanJob, []domain.ScanResult, [][]domain.ScanPort) error
 }
@@ -25,13 +25,23 @@ type scanRunner interface {
 	RunWithTimeout(context.Context, string, time.Duration) (nmap.RunOutput, error)
 }
 
+type MetricsRecorder interface {
+	RecordNmapExecution(time.Duration)
+	RecordScanJobOutcomes(string, int64)
+}
+
 type Processor struct {
 	repository     repository
 	runner         scanRunner
 	defaultTimeout time.Duration
+	metrics        MetricsRecorder
 }
 
 func NewProcessor(repo repository, runner scanRunner, defaultTimeout time.Duration) (*Processor, error) {
+	return NewProcessorWithMetrics(repo, runner, defaultTimeout, nil)
+}
+
+func NewProcessorWithMetrics(repo repository, runner scanRunner, defaultTimeout time.Duration, metrics MetricsRecorder) (*Processor, error) {
 	if repo == nil {
 		return nil, errors.New("worker repository is required")
 	}
@@ -44,7 +54,7 @@ func NewProcessor(repo repository, runner scanRunner, defaultTimeout time.Durati
 	if defaultTimeout > MaxScanTimeout {
 		defaultTimeout = MaxScanTimeout
 	}
-	return &Processor{repository: repo, runner: runner, defaultTimeout: defaultTimeout}, nil
+	return &Processor{repository: repo, runner: runner, defaultTimeout: defaultTimeout, metrics: metrics}, nil
 }
 
 func (p *Processor) process(ctx context.Context, job domain.ScanJob) error {
@@ -56,7 +66,11 @@ func (p *Processor) process(ctx context.Context, job domain.ScanJob) error {
 		timeout = MaxScanTimeout
 	}
 
+	nmapStarted := time.Now()
 	output, err := p.runner.RunWithTimeout(ctx, job.TargetValue, timeout)
+	if p.metrics != nil {
+		p.metrics.RecordNmapExecution(time.Since(nmapStarted))
+	}
 	if err != nil {
 		if ctx.Err() != nil || errors.Is(err, nmap.ErrParentCanceled) || errors.Is(err, nmap.ErrParentDeadline) {
 			return nil
@@ -119,6 +133,9 @@ func (p *Processor) process(ctx context.Context, job domain.ScanJob) error {
 		}
 		return p.fail(ctx, job, "failed", fmt.Sprintf("persist scan results: %v", err))
 	}
+	if p.metrics != nil {
+		p.metrics.RecordScanJobOutcomes("completed", 1)
+	}
 	return nil
 }
 
@@ -133,6 +150,9 @@ func (p *Processor) fail(ctx context.Context, job domain.ScanJob, status, messag
 	}
 	if !updated {
 		return fmt.Errorf("%w: job %d", db.ErrClaimLost, job.ID)
+	}
+	if p.metrics != nil {
+		p.metrics.RecordScanJobOutcomes(status, 1)
 	}
 	return fmt.Errorf("scan job %d %s: %s", job.ID, status, message)
 }

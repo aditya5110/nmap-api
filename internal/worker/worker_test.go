@@ -20,7 +20,8 @@ const validScanXML = `<nmaprun start="1700000000"><host starttime="1700000000" e
 // TestProcessorSuccessfulScan verifies fake Nmap XML marks the job completed and stores its resolved host and open HTTP port.
 func TestProcessorSuccessfulScan(t *testing.T) {
 	repo := newTestRepository(testJob(1, "example.test", 60))
-	processor := newTestProcessor(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second)
+	metrics := newRecordingMetrics()
+	processor := newTestProcessorWithMetrics(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second, metrics)
 	job := claimJob(t, repo)
 
 	if err := processor.process(context.Background(), job); err != nil {
@@ -39,6 +40,12 @@ func TestProcessorSuccessfulScan(t *testing.T) {
 	}
 	if repo.ports[0][0].Port != 80 || repo.ports[0][0].State != "open" || *repo.ports[0][0].ServiceName != "http" {
 		t.Fatalf("unexpected persisted port: %#v", repo.ports[0][0])
+	}
+	if got := metrics.outcomeCount("completed"); got != 1 || metrics.totalOutcomes() != 1 {
+		t.Fatalf("persisted completion metrics = completed:%d total:%d, want 1 and 1", got, metrics.totalOutcomes())
+	}
+	if metrics.nmapDurationCount() != 1 || metrics.lastNmapDuration() <= 0 {
+		t.Fatalf("Nmap duration observations = %d, last duration %s", metrics.nmapDurationCount(), metrics.lastNmapDuration())
 	}
 }
 
@@ -70,7 +77,8 @@ func TestProcessorPersistsExpandedExtraports(t *testing.T) {
 // TestProcessorNmapFailureIsFailed verifies a fake Nmap exit failure marks the job failed and preserves stderr in its error details.
 func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	repo := newTestRepository(testJob(2, "example.test", 60))
-	processor := newTestProcessor(t, repo, "printf 'connection failed' >&2\nexit 7\n", 60*time.Second)
+	metrics := newRecordingMetrics()
+	processor := newTestProcessorWithMetrics(t, repo, "printf 'connection failed' >&2\nexit 7\n", 60*time.Second, metrics)
 	job := claimJob(t, repo)
 
 	err := processor.process(context.Background(), job)
@@ -81,12 +89,16 @@ func TestProcessorNmapFailureIsFailed(t *testing.T) {
 	if stored.Status != "failed" || stored.ErrorMessage == nil || !strings.Contains(*stored.ErrorMessage, "connection failed") {
 		t.Fatalf("expected failed status and diagnostic, got %#v", stored)
 	}
+	if got := metrics.outcomeCount("failed"); got != 1 || metrics.totalOutcomes() != 1 {
+		t.Fatalf("persisted failure metrics = failed:%d total:%d, want 1 and 1", got, metrics.totalOutcomes())
+	}
 }
 
 // TestProcessorNmapTimeoutIsTimedOut verifies a fake scan exceeding its one-second limit leaves the job timed_out.
 func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	repo := newTestRepository(testJob(3, "example.test", 1))
-	processor := newTestProcessor(t, repo, "exec /bin/sleep 5\n", time.Second)
+	metrics := newRecordingMetrics()
+	processor := newTestProcessorWithMetrics(t, repo, "exec /bin/sleep 5\n", time.Second, metrics)
 	job := claimJob(t, repo)
 
 	err := processor.process(context.Background(), job)
@@ -95,6 +107,9 @@ func TestProcessorNmapTimeoutIsTimedOut(t *testing.T) {
 	}
 	if status := repo.jobSnapshot(job.ID).Status; status != "timed_out" {
 		t.Fatalf("expected timed_out job status, got %q", status)
+	}
+	if got := metrics.outcomeCount("timed_out"); got != 1 || metrics.totalOutcomes() != 1 {
+		t.Fatalf("timeout metrics = timed_out:%d total:%d, want 1 and 1", got, metrics.totalOutcomes())
 	}
 }
 
@@ -119,7 +134,8 @@ func TestProcessorXMLParsingFailureIsFailed(t *testing.T) {
 func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	repo := newTestRepository(testJob(5, "example.test", 60))
 	repo.completeErr = errors.New("database unavailable")
-	processor := newTestProcessor(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second)
+	metrics := newRecordingMetrics()
+	processor := newTestProcessorWithMetrics(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second, metrics)
 	job := claimJob(t, repo)
 
 	if err := processor.process(context.Background(), job); err == nil || !strings.Contains(err.Error(), "database unavailable") {
@@ -127,6 +143,25 @@ func TestProcessorPersistenceFailureMarksJobFailed(t *testing.T) {
 	}
 	if status := repo.jobSnapshot(job.ID).Status; status != "failed" {
 		t.Fatalf("expected failed status after persistence error, got %q", status)
+	}
+	if metrics.outcomeCount("failed") != 1 || metrics.outcomeCount("completed") != 0 {
+		t.Fatalf("unexpected terminal outcome metrics: %#v", metrics.outcomes)
+	}
+}
+
+// TestProcessorLostClaimDoesNotRecordTerminalOutcome verifies a stale worker that cannot persist completion does not increment a terminal job counter.
+func TestProcessorLostClaimDoesNotRecordTerminalOutcome(t *testing.T) {
+	repo := newTestRepository(testJob(11, "example.test", 60))
+	repo.completeErr = db.ErrClaimLost
+	metrics := newRecordingMetrics()
+	processor := newTestProcessorWithMetrics(t, repo, "printf '%s' "+shellQuote(validScanXML)+"\n", 60*time.Second, metrics)
+	job := claimJob(t, repo)
+
+	if err := processor.process(context.Background(), job); !errors.Is(err, db.ErrClaimLost) {
+		t.Fatalf("expected lost claim, got %v", err)
+	}
+	if metrics.totalOutcomes() != 0 {
+		t.Fatalf("lost claim recorded terminal outcomes: %#v", metrics.outcomes)
 	}
 }
 
@@ -253,6 +288,56 @@ func TestPoolCoordinatesPeriodicLeaseRecovery(t *testing.T) {
 	}
 }
 
+// TestPoolCountsOnlyPermanentlyFailedLeaseRecoveries verifies retryable expired jobs are requeued without failure metrics and exhausted jobs count once.
+func TestPoolCountsOnlyPermanentlyFailedLeaseRecoveries(t *testing.T) {
+	now := time.Now().UTC()
+	started := now.Add(-time.Minute)
+	expired := now.Add(-time.Second)
+	repo := newTestRepository(
+		domain.ScanJob{ID: 30, Status: "running", Attempts: 1, StartedAt: &started, LeaseExpiresAt: &expired},
+		domain.ScanJob{ID: 31, Status: "running", Attempts: db.MaxJobAttempts, StartedAt: &started, LeaseExpiresAt: &expired},
+	)
+	metrics := newRecordingMetrics()
+	processor, err := NewProcessorWithMetrics(repo, &recordingRunner{}, time.Minute, metrics)
+	if err != nil {
+		t.Fatalf("NewProcessorWithMetrics: %v", err)
+	}
+	pool, err := NewPool(processor, 1, time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	pool.recoveryInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pool.runRecovery(ctx)
+		close(done)
+	}()
+
+	deadline := time.After(time.Second)
+	for repo.recoveryCallCount() == 0 {
+		select {
+		case <-time.After(time.Millisecond):
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("recovery loop did not run")
+		}
+	}
+	cancel()
+	<-done
+
+	if got := repo.jobSnapshot(30).Status; got != "pending" {
+		t.Fatalf("retryable expired job status = %q, want pending", got)
+	}
+	if got := repo.jobSnapshot(31).Status; got != "failed" {
+		t.Fatalf("exhausted expired job status = %q, want failed", got)
+	}
+	if metrics.outcomeCount("failed") != 1 || metrics.totalOutcomes() != 1 {
+		t.Fatalf("recovery outcome metrics = %#v, want exactly one permanent failure", metrics.outcomes)
+	}
+}
+
 // TestNewPoolRequiresPositiveWorkerCount verifies pool construction rejects zero workers instead of starting no scan processors.
 func TestNewPoolRequiresPositiveWorkerCount(t *testing.T) {
 	repo := newTestRepository()
@@ -278,12 +363,70 @@ func (r *recordingRunner) RunWithTimeout(_ context.Context, _ string, timeout ti
 
 func newTestProcessor(t *testing.T, repo *testRepository, script string, defaultTimeout time.Duration) *Processor {
 	t.Helper()
+	return newTestProcessorWithMetrics(t, repo, script, defaultTimeout, nil)
+}
+
+func newTestProcessorWithMetrics(t *testing.T, repo *testRepository, script string, defaultTimeout time.Duration, metrics MetricsRecorder) *Processor {
+	t.Helper()
 	runner := newTestRunner(t, script, defaultTimeout)
-	processor, err := NewProcessor(repo, runner, defaultTimeout)
+	processor, err := NewProcessorWithMetrics(repo, runner, defaultTimeout, metrics)
 	if err != nil {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 	return processor
+}
+
+type recordingMetrics struct {
+	mu            sync.Mutex
+	outcomes      map[string]int64
+	nmapDurations []time.Duration
+}
+
+func newRecordingMetrics() *recordingMetrics {
+	return &recordingMetrics{outcomes: make(map[string]int64)}
+}
+
+func (m *recordingMetrics) RecordNmapExecution(duration time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nmapDurations = append(m.nmapDurations, duration)
+}
+
+func (m *recordingMetrics) RecordScanJobOutcomes(outcome string, count int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outcomes[outcome] += count
+}
+
+func (m *recordingMetrics) outcomeCount(outcome string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.outcomes[outcome]
+}
+
+func (m *recordingMetrics) totalOutcomes() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total int64
+	for _, count := range m.outcomes {
+		total += count
+	}
+	return total
+}
+
+func (m *recordingMetrics) nmapDurationCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.nmapDurations)
+}
+
+func (m *recordingMetrics) lastNmapDuration() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.nmapDurations) == 0 {
+		return 0
+	}
+	return m.nmapDurations[len(m.nmapDurations)-1]
 }
 
 func newTestRunner(t *testing.T, script string, timeout time.Duration) *nmap.Runner {
@@ -374,23 +517,24 @@ func (r *testRepository) ClaimNextJob(_ context.Context, leaseDuration time.Dura
 	return nil, nil
 }
 
-func (r *testRepository) RecoverExpiredJobs(_ context.Context) (int64, error) {
+func (r *testRepository) RecoverExpiredJobs(_ context.Context) (db.LeaseRecoveryResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.recoverCalls++
-	var recovered int64
+	var recovered db.LeaseRecoveryResult
 	for id, job := range r.jobs {
 		if job.Status != "running" || job.LeaseExpiresAt == nil || job.LeaseExpiresAt.After(time.Now()) {
 			continue
 		}
 		if job.Attempts >= db.MaxJobAttempts {
 			job.Status = "failed"
+			recovered.Failed++
 		} else {
 			job.Status = "pending"
+			recovered.Requeued++
 		}
 		job.LeaseExpiresAt = nil
 		r.jobs[id] = job
-		recovered++
 	}
 	return recovered, nil
 }

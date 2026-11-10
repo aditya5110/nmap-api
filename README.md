@@ -20,9 +20,9 @@ docker compose up --build -d
 docker compose exec -T postgres psql -U appuser -d nmapdb < migrations/001_init.up.sql
 ```
 
-`docker compose up --build -d` starts the PostgreSQL and API containers. Docker Compose automatically reads `.env` for `${...}` interpolation in `docker-compose.yml` and passes the configured values into the containers. The API listens on port 8080.
+`docker compose up --build -d` starts PostgreSQL, the API, and Prometheus. Docker Compose automatically reads `.env` for `${...}` interpolation in `docker-compose.yml` and passes the configured values into the containers. The API listens on port 8080, Prometheus on port 9090.
 
-The migration command runs `migrations/001_init.up.sql` against PostgreSQL in the `postgres` container. It creates the tables, indexes, and constraints required by the application. Migrations do not run automatically; apply this migration once when initializing a fresh database. If you customize `DB_USER` or `DB_NAME` in `.env`, update `appuser` or `nmapdb` in the command to match.
+Prometheus scrapes `api:8080/metrics` over the Compose network. For metric details and operating instructions, see [Prometheus metrics](#prometheus-metrics) and the [Prometheus guide](docs/prometheus-guide.md).
 
 `SCAN_ALLOWED_TARGETS` is a comma-separated list of exact IPv4, IPv6, or hostname entries. IPs are normalized and hostnames are matched case-insensitively. Wildcards and CIDR ranges are not supported. The API does not perform DNS resolution while validating requests.
 
@@ -49,7 +49,7 @@ curl -X POST http://localhost:8080/api/v1/scans \
 
 ### Retrieve recent scans
 
-`GET /api/v1/targets/{target}/scans` returns the newest scans first. The optional `limit` is between 1 and 100; it defaults to 20. The optional `state` filter accepts `open`, `closed`, `filtered`, or `all` (case-insensitive). If omitted, only open and closed port observations are returned; scans remain in the response even when no ports match the filter.
+`GET /api/v1/targets/{target}/scans` returns the newest scans first. The optional `limit` is between 1 and 100; it defaults to 20. The optional `state` filter accepts `open`, `closed`, `filtered`, or `all` (case-insensitive); unsupported or repeated values return `400 Bad Request`. If omitted, only open and closed port observations are returned; scans remain in the response even when no ports match the filter.
 Timestamp fields in API responses use Indian Standard Time (IST, UTC+05:30); PostgreSQL continues to store timezone-aware timestamps.
 
 ```bash
@@ -222,4 +222,8 @@ The `404 Not Found` response when no comparable pair is available is:
 ```bash
 go test ./...
 ```
+
+### Prometheus metrics
+
+Open the API metrics endpoint at <http://localhost:8080/metrics> or Prometheus UI at <http://localhost:9090>. The API exports `http_requests_total`, `http_request_duration_seconds`, `http_requests_in_flight`, `scan_jobs_total`, and `nmap_execution_duration_seconds`. HTTP labels use normalized route templates, never target values. Job outcomes count only persisted terminal states; retries do not count as failures. The `/metrics` endpoint is Prometheus exposition text, not JSON, and its own scrapes are excluded from application HTTP metrics. See [docs/prometheus-guide.md](docs/prometheus-guide.md) for PromQL queries, restart, safe reset, and rebuild instructions.
 

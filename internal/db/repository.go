@@ -18,6 +18,11 @@ var ErrClaimLost = errors.New("scan job claim is no longer current")
 
 const MaxJobAttempts = 3
 
+type LeaseRecoveryResult struct {
+	Requeued int64
+	Failed   int64
+}
+
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
@@ -69,10 +74,10 @@ func (r *Repository) ClaimNextJob(ctx context.Context, leaseDuration time.Durati
 	return &job, nil
 }
 
-func (r *Repository) RecoverExpiredJobs(ctx context.Context) (int64, error) {
+func (r *Repository) RecoverExpiredJobs(ctx context.Context) (LeaseRecoveryResult, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin lease recovery transaction: %w", err)
+		return LeaseRecoveryResult{}, fmt.Errorf("begin lease recovery transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -83,39 +88,44 @@ func (r *Repository) RecoverExpiredJobs(ctx context.Context) (int64, error) {
 		     error_message = CASE WHEN attempts >= $1 THEN 'lease expired after maximum attempts' ELSE NULL END,
 		     lease_expires_at = NULL
 		 WHERE status = 'running' AND lease_expires_at <= NOW()
-		 RETURNING request_id`,
+		 RETURNING request_id, status`,
 		MaxJobAttempts,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("recover expired jobs: %w", err)
+		return LeaseRecoveryResult{}, fmt.Errorf("recover expired jobs: %w", err)
 	}
 	requestIDs := make(map[int64]struct{})
-	var count int64
+	var result LeaseRecoveryResult
 	for rows.Next() {
 		var requestID int64
-		if err := rows.Scan(&requestID); err != nil {
+		var status string
+		if err := rows.Scan(&requestID, &status); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("read recovered job request id: %w", err)
+			return LeaseRecoveryResult{}, fmt.Errorf("read recovered job status: %w", err)
 		}
 		requestIDs[requestID] = struct{}{}
-		count++
+		if status == "failed" {
+			result.Failed++
+		} else {
+			result.Requeued++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, fmt.Errorf("iterate recovered jobs: %w", err)
+		return LeaseRecoveryResult{}, fmt.Errorf("iterate recovered jobs: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("close recovered jobs rows: %w", err)
+		return LeaseRecoveryResult{}, fmt.Errorf("close recovered jobs rows: %w", err)
 	}
 	for requestID := range requestIDs {
 		if err := refreshScanRequestStatus(ctx, tx, requestID); err != nil {
-			return 0, fmt.Errorf("update scan request status after lease recovery: %w", err)
+			return LeaseRecoveryResult{}, fmt.Errorf("update scan request status after lease recovery: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit lease recovery: %w", err)
+		return LeaseRecoveryResult{}, fmt.Errorf("commit lease recovery: %w", err)
 	}
-	return count, nil
+	return result, nil
 }
 
 func (r *Repository) UpdateClaimedJobStatus(ctx context.Context, claim domain.ScanJob, status string, finishedAt time.Time, errorMessage *string) (bool, error) {

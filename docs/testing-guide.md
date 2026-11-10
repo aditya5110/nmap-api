@@ -76,6 +76,8 @@ docker compose ps api
 
 Check that the container is up and running.
 
+If Prometheus is running, it will resume scraping the rebuilt API at `api:8080`. Its history remains in the `prometheus_data` volume.
+
 ## 5. Start an HTTP Server on Ubuntu
 
 Open a terminal inside the Ubuntu VM and start a simple HTTP server on
@@ -128,6 +130,8 @@ After the scan completes, send the following GET request in Postman.
 http://localhost:8080/api/v1/targets/<UBUNTU_MACHINE_IP>/scans?limit=5
 ```
 
+The default `/scans` response shows only open and closed ports. Use `?limit=5&state=all` to inspect filtered ports too, or `?limit=5&state=filtered` to show only filtered observations.
+
 Verify that the scan appears in the response and that port `8080` is
 reported as **open**.
 
@@ -178,14 +182,14 @@ This creates another scan after the HTTP server has been stopped.
 
 ## 11. Verify the Second Scan
 
-Send the same GET request again.
+Send the GET request again with `state=all` so the response includes filtered observations as well as open/closed ports.
 
 **Method:** `GET`
 
 **URL:**
 
 ``` text
-http://localhost:8080/api/v1/targets/<UBUNTU_MACHINE_IP>/scans?limit=5
+http://localhost:8080/api/v1/targets/<UBUNTU_MACHINE_IP>/scans?limit=5&state=all
 ```
 
 Check the scan history and compare the results of the two scans.
@@ -205,7 +209,12 @@ http://localhost:8080/api/v1/targets/<UBUNTU_MACHINE_IP>/changes
 Verify the changes between the two scans.
 
 In particular, check whether port `8080` has changed from **open** in
-the first scan to **closed** or **filtered** in the second scan.
+the first scan to an explicitly observed **closed** or **filtered** state
+in the second scan. If Nmap does not report an individual port entry or
+an exact port membership in its `<extraports>` reasons, the API preserves
+the missing observation rather than guessing its state. The changes
+endpoint compares all persisted states and does not use the `/scans`
+state filter.
 
 ------------------------------------------------------------------------
 

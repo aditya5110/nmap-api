@@ -74,8 +74,13 @@ func (p *Pool) runRecovery(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := p.processor.repository.RecoverExpiredJobs(ctx); err != nil && ctx.Err() == nil {
+			result, err := p.processor.repository.RecoverExpiredJobs(ctx)
+			if err != nil && ctx.Err() == nil {
 				log.Printf("recover expired jobs: %v", err)
+				continue
+			}
+			if p.processor.metrics != nil {
+				p.processor.metrics.RecordScanJobOutcomes("failed", result.Failed)
 			}
 		}
 	}

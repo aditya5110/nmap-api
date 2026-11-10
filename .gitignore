@@ -12,3 +12,4 @@ coverage.txt
 
 # Local PostgreSQL data
 postgres_data/
+docs/implementation-plan.md

@@ -200,12 +200,12 @@ func TestRecoverExpiredJobs(t *testing.T) {
 
 	repo := NewRepository(db)
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE scan_jobs").WithArgs(MaxJobAttempts).WillReturnRows(sqlmock.NewRows([]string{"request_id"}).AddRow(int64(3)).AddRow(int64(3)))
+	mock.ExpectQuery("UPDATE scan_jobs").WithArgs(MaxJobAttempts).WillReturnRows(sqlmock.NewRows([]string{"request_id", "status"}).AddRow(int64(3), "pending").AddRow(int64(3), "failed"))
 	expectRequestStatus(mock, int64(3), "running", 2, 1, 0, 1, 0)
 	mock.ExpectCommit()
-	count, err := repo.RecoverExpiredJobs(context.Background())
-	if err != nil || count != 2 {
-		t.Fatalf("expected two recovered jobs, count=%d err=%v", count, err)
+	result, err := repo.RecoverExpiredJobs(context.Background())
+	if err != nil || result.Requeued != 1 || result.Failed != 1 {
+		t.Fatalf("expected one requeued and one failed job, result=%+v err=%v", result, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)

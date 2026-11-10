@@ -13,7 +13,8 @@ The project helps engineers investigate whether selected TCP ports appear reacha
 | Go 1.22 | HTTP server, validation and services, bounded workers, process execution, XML parsing, and database access. Go's contexts support cancellation/deadlines, and goroutines make a fixed-size worker pool straightforward. The Docker build produces a static Linux binary. |
 | PostgreSQL 16 | Durable scan requests, per-target jobs, host results, and port observations. Transactions protect batch creation and result completion; row locking supports concurrent job claims. |
 | Nmap CLI | Performs the actual network scan with a fixed TCP profile and emits machine-readable XML. Nmap is an assignment requirement and a mature scanner; it must be installed wherever the API runs. |
-| Docker / Compose | Provides a repeatable local PostgreSQL and API environment. The API image installs Nmap in its Alpine runtime image. Compose is local orchestration, not a production cluster. |
+| Docker / Compose | Provides a repeatable local PostgreSQL, API, and Prometheus environment. The API image installs Nmap in its Alpine runtime image. Compose is local orchestration, not a production cluster. |
+| Prometheus | Scrapes the API's `/metrics` endpoint for HTTP, scan-outcome, and Nmap execution metrics; Compose persists its time series in a separate named volume. |
 | pgx v5 via `database/sql` | PostgreSQL driver. `go-sqlmock` is used for repository unit tests. |
 
 Go and PostgreSQL are suitable for this MVP because the code needs bounded concurrency, context-aware process execution, transactional relational persistence, and concurrent queue-like claims. These are implementation benefits, not performance benchmarks. The application uses the Nmap CLI rather than implementing port scanning itself.
@@ -23,20 +24,21 @@ Go and PostgreSQL are suitable for this MVP because the code needs bounded concu
 - `cmd/api`: application entry point. Loads configuration, connects to PostgreSQL, constructs services and workers, starts HTTP and background processing, and handles shutdown signals.
 - `cmd/nmap-demo`: standalone Nmap runner/parser demonstration; it is separate from the REST API.
 - `internal/api`: HTTP routes, JSON decoding/encoding, method checks, request-size handling, and API error mapping. It does not contain SQL.
+- `internal/metrics`: Prometheus metric registry, `/metrics` handler, bounded-label HTTP instrumentation, and recorders used by workers.
 - `internal/service`: scan-submission validation and history/change comparison logic.
 - `internal/domain`: shared request, job, result, port, and history data types.
 - `internal/db`: PostgreSQL connection setup and repository queries/transactions, including job claiming, lease recovery, persistence, history, and changes queries.
 - `internal/nmap`: safe argument-vector process invocation, timeout/cancellation handling, XML parsing, and Nmap result types.
 - `internal/worker`: fixed-size worker pool, periodic lease recovery, and processing of a single job from Nmap execution through persistence.
 - `migrations`: initial PostgreSQL schema and rollback SQL. The API does not run migrations at startup.
-- `docs`: assignment requirements, API design, implementation plan, architecture, and this developer-facing guide.
-- `Dockerfile`, `docker-compose.yml`, `.env.example`: container build, local services, and sample Compose settings.
+- `docs`: assignment requirements, API design, implementation plan, architecture, testing guide, Prometheus guide, and this developer-facing guide.
+- `Dockerfile`, `docker-compose.yml`, `prometheus.yml`, `.env.example`: container build, local services, Prometheus scrape configuration, and sample Compose settings.
 
 A typical dependency direction is: HTTP handler → service → repository interface → PostgreSQL; workers → repository and Nmap runner/parser. The `domain` types pass data between these layers.
 
 ## 4. Architecture overview
 
-The API and worker pool currently run in the same Go process. PostgreSQL is both the durable store and the pending-job queue. The worker count bounds concurrent Nmap processes in that process.
+The API and worker pool currently run in the same Go process. PostgreSQL is both the durable store and the pending-job queue. The worker count bounds concurrent Nmap processes in that process. Prometheus runs separately in Compose and scrapes the API over the Compose network.
 
 ```mermaid
 flowchart LR
@@ -50,11 +52,12 @@ flowchart LR
     Nmap --> Parse[XML parser]
     Parse --> Workers
     Workers --> DB
+    Prometheus[Prometheus] -. scrape /metrics .-> API
 ```
 
 ## 5. API documentation
 
-All responses are JSON. The implemented endpoints are below.
+All REST API responses are JSON. The Prometheus `/metrics` endpoint is separate and returns Prometheus exposition text. The implemented routes are below.
 
 ### `POST /api/v1/scans`
 
@@ -276,6 +279,20 @@ Recent history includes job status/times and any stored host/port observations. 
 - On SIGINT/SIGTERM, the process cancels workers (which cancels in-flight Nmap processes), asks the HTTP server to shut down with a 10-second limit, waits for workers, then closes the database. A canceled in-flight job remains leased/running for later recovery rather than being marked failed due solely to shutdown.
 - Request/job insertion and result/port completion are transactional. Each target is independent, so a failed scan does not block or cancel other jobs in its batch. Aggregate request status reflects all child jobs, but is not exposed by an endpoint.
 
+## Prometheus metrics
+
+The application registers metrics in an isolated Prometheus registry and exposes them at `GET /metrics`. Compose's Prometheus service scrapes `api:8080` every 15 seconds. The API metrics handler is separate from application routes; scrapes do not increment application request counters.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `http_requests_total` | Counter | `method`, normalized `route`, `status_code` | Completed application HTTP requests. |
+| `http_request_duration_seconds` | Histogram | `method`, normalized `route`, `status_code` | Application request duration, including handler work. |
+| `http_requests_in_flight` | Gauge | `method`, normalized `route` | Requests currently executing in the application handler. |
+| `scan_jobs_total` | Counter | `outcome` (`completed`, `failed`, `timed_out`) | Jobs after a terminal status is persisted. Requeued lease-expired jobs are not counted as failed. |
+| `nmap_execution_duration_seconds` | Histogram | None | Time spent in the Nmap runner call; excludes XML parsing and database persistence. |
+
+Labels are bounded: routes use templates, and target values, hostnames, request IDs, and job IDs are never labels. Counter series appear after their first observation; a fresh process may not yet expose series for every method, route, status, or job outcome. The implementation does not poll PostgreSQL for pending/running gauges.
+
 ## 10. Configuration and running locally
 
 ### Prerequisites
@@ -327,13 +344,13 @@ To run the API directly, start/configure PostgreSQL, apply the migration, export
 
 The repository has tests for:
 
-- API method handling, JSON responses, accepted batches, target/timeout/batch validation, history limits and state filters, and changes.
+- API method handling, JSON responses, accepted batches, target/timeout/batch validation, history state filters, changes, and `/metrics` behavior.
 - Configuration parsing and empty/malformed allowlist entries.
 - Nmap argument construction, XML/stderr separation, process failures, timeout, parent cancellation, and parent deadline.
 - XML parsing of multiple IPv4/IPv6 hosts, individual and exact-membership aggregate port states, missing ports, malformed XML/fields, and timestamps, using fixtures under `internal/nmap/testdata`.
 - Scan/history service behavior, target matching, and port change semantics (including not synthesizing `closed`).
 - Repository transaction/rollback behavior and SQL expectations using `go-sqlmock`.
-- Worker processing, independent target failures, shutdown cancellation, timeout handling, and periodic recovery.
+- Worker processing, independent target failures, shutdown cancellation, timeout handling, periodic recovery, and terminal metrics recording.
 - PostgreSQL integration tests (build-tagged `integration`) for concurrent claims, lease retries/fencing, aggregation, migrations, result replacement, and history queries. They require a PostgreSQL connection configured by `DB_PASSWORD` and optional `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_NAME`, and `DB_SSLMODE`; the database user must be allowed to create schemas. Tests create an isolated schema and apply the migration within it.
 - API shutdown ordering in `cmd/api`.
 
@@ -341,6 +358,6 @@ Run unit tests with `go test ./...`. Run PostgreSQL integration tests with `go t
 
 ## 12. Limitations and future improvements
 
-Implemented functionality is limited to the fixed top-1,000 TCP scan profile, a single-process bounded worker pool, PostgreSQL-backed jobs, the three documented API routes, and basic process logging. There is no authentication, request-status endpoint, migration runner, broker, distributed worker deployment, rate limiting, global queue limit, metrics endpoint, tracing, or proof of firewall configuration. The MVP has not been benchmarked for high throughput and does not claim support for one million requests per second.
+Implemented functionality includes the fixed top-1,000 TCP scan profile, a single-process bounded worker pool, PostgreSQL-backed jobs, the three REST routes plus Prometheus `GET /metrics`, and basic process logging. There is no authentication, request-status endpoint, migration runner, broker, distributed worker deployment, rate limiting, global queue limit, tracing, or proof of firewall configuration. Prometheus metrics are local instrumentation, not a high-availability monitoring deployment. The MVP has not been benchmarked for high throughput and does not claim support for one million requests per second.
 
 Potential future work—only if the deployment needs it—includes authentication and authorization, outbound-network restrictions, queue admission control, structured telemetry, migration versioning, separate API and worker deployments, a broker with an outbox, read replicas, partitioning, object storage for large raw XML, and selective caching. These are proposals, not current features. See [architecture.md](architecture.md) for the scalability discussion.

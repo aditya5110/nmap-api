@@ -2,7 +2,7 @@
 
 ## 1. Current MVP architecture
 
-The API and worker pool run in one Go process. PostgreSQL stores requests, target jobs, scan results, and port observations; it also acts as the durable work queue. The API returns after persisting a batch, while a fixed number of workers poll for jobs and execute Nmap asynchronously. The current implementation is a local MVP, not a high-volume deployment.
+The API and worker pool run in one Go process. PostgreSQL stores requests, target jobs, scan results, and port observations; it also acts as the durable work queue. The API returns after persisting a batch, while a fixed number of workers poll for jobs and execute Nmap asynchronously. Prometheus runs as a separate Compose service and scrapes the API's `/metrics` endpoint. The current implementation is a local MVP, not a high-volume deployment.
 
 ```mermaid
 flowchart LR
@@ -16,6 +16,7 @@ flowchart LR
     Nmap --> XML[XML parser]
     XML --> Pool
     Pool --> DB
+    Prometheus[Prometheus] -. scrape /metrics .-> API
 ```
 
 The API validates requests and reads data; services hold business rules; the repository owns SQL and transactions; workers coordinate processing; and the Nmap package runs/parses scans. Nmap observations describe what the scanner sees on the network. The application does not inspect or modify firewall rules.
@@ -101,13 +102,14 @@ flowchart LR
 - Apply per-route and per-identity rate limits at the edge; impose batch, queue, tenant, and target concurrency limits before accepting work.
 - Use queue age/lag and worker saturation for admission decisions and controlled load shedding. Bound retries, use backoff/jitter for recoverable failures, and make writes/consumption idempotent.
 - Keep database transactions short; use connection pools sized to the database, partitioning and retention policies based on actual workload, and read replicas only for eligible reads.
-- Track request rates/latency/errors, accepted jobs, queue lag, scan duration/outcomes, worker saturation, lease recovery, database pool/transaction health, and Nmap resource use. Add structured logs, traces, audit events, alerts, and service objectives. None of metrics, tracing, audit pipeline, or dashboards is implemented in the MVP.
+- **Implemented metrics:** the API exposes Prometheus metrics at `GET /metrics`. `http_requests_total` is a counter labeled by method, normalized route, and status code; `http_request_duration_seconds` is a histogram with those labels; `http_requests_in_flight` is a gauge labeled by method and normalized route. The endpoint excludes its own scrapes. `scan_jobs_total` is a counter labeled by terminal outcome (`completed`, `failed`, `timed_out`), incremented only after a terminal state is persisted; requeued jobs do not count as failures. `nmap_execution_duration_seconds` is a histogram around the Nmap process call, excluding parsing/persistence. No target, hostname, request ID, or job ID is used as a metric label. Prometheus scrapes `api:8080` every 15 seconds and persists its TSDB in a named Compose volume.
+- **Not implemented observability:** pending/running job gauges, database pool metrics, structured logs, distributed tracing, audit events, alert rules, dashboards, and service objectives are not currently provided.
 - Authenticate and authorize callers, enforce target ownership/scope, and audit scan requests. Because DNS resolution occurs during execution, a production worker should validate resolved addresses against policy and use outbound network controls to block unintended private, link-local, metadata, or loopback destinations unless explicitly authorized. A submitted hostname allowlist alone is not sufficient protection against DNS changes.
 - Protect broker and database credentials, use TLS across trust boundaries, restrict worker egress, and isolate Nmap processes. These are production design considerations, not current features.
 
 ### Current reliability boundaries
 
-The MVP has transactional request/job creation and result completion, PostgreSQL `FOR UPDATE SKIP LOCKED` claiming, timestamp fencing, a 150-second lease, periodic recovery, up to three claims for expired leases, parent-context cancellation, generic JSON server errors, and basic process logs. It has no client idempotency key, global pending-work limit, automatic migrations, authentication, rate limiting, broker, distributed worker fleet, metrics, tracing, or readiness/liveness endpoint. A caller retrying a submission creates a new request. An in-flight job canceled by shutdown remains leased for recovery.
+The MVP has transactional request/job creation and result completion, PostgreSQL `FOR UPDATE SKIP LOCKED` claiming, timestamp fencing, a 150-second lease, periodic recovery, up to three claims for expired leases, parent-context cancellation, generic JSON server errors, basic process logs, and the Prometheus metrics listed above. It has no client idempotency key, global pending-work limit, automatic migrations, authentication, rate limiting, broker, distributed worker fleet, tracing, or readiness/liveness endpoint. A caller retrying a submission creates a new request. An in-flight job canceled by shutdown remains leased for recovery.
 
 ## 8. Capacity planning approach
 

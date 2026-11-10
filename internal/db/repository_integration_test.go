@@ -230,8 +230,8 @@ func TestPostgresExpiredLeaseRetriesThenFailsAndFencesStaleClaim(t *testing.T) {
 		t.Fatalf("first claim failed: job=%#v err=%v", first, err)
 	}
 	expireIntegrationJob(t, ctx, db, jobID)
-	if count, err := repo.RecoverExpiredJobs(ctx); err != nil || count != 1 {
-		t.Fatalf("first lease recovery count=%d err=%v", count, err)
+	if result, err := repo.RecoverExpiredJobs(ctx); err != nil || result.Requeued != 1 || result.Failed != 0 {
+		t.Fatalf("first lease recovery result=%+v err=%v", result, err)
 	}
 
 	second, err := repo.ClaimNextJob(ctx, 150*time.Second)
@@ -249,16 +249,16 @@ func TestPostgresExpiredLeaseRetriesThenFailsAndFencesStaleClaim(t *testing.T) {
 	}
 
 	expireIntegrationJob(t, ctx, db, jobID)
-	if count, err := repo.RecoverExpiredJobs(ctx); err != nil || count != 1 {
-		t.Fatalf("second lease recovery count=%d err=%v", count, err)
+	if result, err := repo.RecoverExpiredJobs(ctx); err != nil || result.Requeued != 1 || result.Failed != 0 {
+		t.Fatalf("second lease recovery result=%+v err=%v", result, err)
 	}
 	third, err := repo.ClaimNextJob(ctx, 150*time.Second)
 	if err != nil || third == nil || third.Attempts != 3 {
 		t.Fatalf("third claim failed: job=%#v err=%v", third, err)
 	}
 	expireIntegrationJob(t, ctx, db, jobID)
-	if count, err := repo.RecoverExpiredJobs(ctx); err != nil || count != 1 {
-		t.Fatalf("final lease recovery count=%d err=%v", count, err)
+	if result, err := repo.RecoverExpiredJobs(ctx); err != nil || result.Requeued != 0 || result.Failed != 1 {
+		t.Fatalf("final lease recovery result=%+v err=%v", result, err)
 	}
 
 	var status string
@@ -295,8 +295,8 @@ func TestPostgresScanRequestStatusAggregationAndLeaseRecovery(t *testing.T) {
 		t.Fatalf("claim second request job: job=%#v err=%v", second, err)
 	}
 	expireIntegrationJob(t, ctx, db, second.ID)
-	if recovered, err := repo.RecoverExpiredJobs(ctx); err != nil || recovered != 1 {
-		t.Fatalf("recover request lease: count=%d err=%v", recovered, err)
+	if recovered, err := repo.RecoverExpiredJobs(ctx); err != nil || recovered.Requeued != 1 || recovered.Failed != 0 {
+		t.Fatalf("recover request lease: result=%+v err=%v", recovered, err)
 	}
 	assertScanRequestStatus(t, ctx, db, requestID, "running")
 	secondRetry, err := repo.ClaimNextJob(ctx, 150*time.Second)
@@ -333,8 +333,8 @@ func TestPostgresLeaseRecoveryRefreshesMultipleRequests(t *testing.T) {
 		}
 		expireIntegrationJob(t, ctx, db, wantID)
 	}
-	if recovered, err := repo.RecoverExpiredJobs(ctx); err != nil || recovered != 2 {
-		t.Fatalf("recover jobs from multiple requests: count=%d err=%v", recovered, err)
+	if recovered, err := repo.RecoverExpiredJobs(ctx); err != nil || recovered.Requeued != 2 || recovered.Failed != 0 {
+		t.Fatalf("recover jobs from multiple requests: result=%+v err=%v", recovered, err)
 	}
 	assertScanRequestStatus(t, ctx, db, firstRequestID, "pending")
 	assertScanRequestStatus(t, ctx, db, secondRequestID, "pending")
