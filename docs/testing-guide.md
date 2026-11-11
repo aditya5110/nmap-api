@@ -74,6 +74,7 @@ The `-count=1` flag disables cached results. A successful package run ends with 
 This option runs both the temporary database and Go test runner in containers, on an isolated Docker network. From the repository root:
 
 ```sh
+set -e
 docker network create nmap-api-test
 docker run -d --name nmap-api-test-postgres --network nmap-api-test \
     -e POSTGRES_USER=appuser \
@@ -84,7 +85,11 @@ docker run -d --name nmap-api-test-postgres --network nmap-api-test \
 until docker exec nmap-api-test-postgres pg_isready -U appuser -d nmap_api_test >/dev/null 2>&1; do
     sleep 1
 done
+```
 
+Run the integration tests once PostgreSQL is ready:
+
+```sh
 docker run --rm --network nmap-api-test \
     -v "$PWD:/src" -w /src \
     -e DB_HOST=nmap-api-test-postgres -e DB_PORT=5432 \
@@ -93,6 +98,14 @@ docker run --rm --network nmap-api-test \
     golang:1.22-alpine \
     go test -tags=integration ./internal/db -count=1 -v
 ```
+
+If Docker reports that `nmap-api-test-postgres` already exists, do not rerun the creation commands or continue to the test command after that failure. The existing container may not be connected to `nmap-api-test`, which causes the test runner's `no such host` error. First verify it is your disposable test database. If it is, skip `docker network create` and `docker run ... postgres:16-alpine`; connect the existing container to the test network once (skip this if it is already connected):
+
+```sh
+docker network connect nmap-api-test nmap-api-test-postgres
+```
+
+Then wait for PostgreSQL readiness and run only the integration-test command above. If the existing container is not the intended test database, choose a different container name and use that same name for `--name` and `DB_HOST`; do not remove an unrelated container.
 
 The Go container needs network access to download Go modules unless its module cache is already populated. After the test command completes, clean up only these disposable test resources:
 
