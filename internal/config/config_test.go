@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,38 @@ func TestLoadAllowsEmptyOrUnsetScanAllowedTargets(t *testing.T) {
 			}
 			if len(cfg.ScanAllowedTargets) != 0 {
 				t.Fatalf("expected empty allowlist, got %#v", cfg.ScanAllowedTargets)
+			}
+		})
+	}
+}
+
+// TestLoadValidatesAndNormalizesScanAllowedTargets verifies valid mixed allowlist entries are trimmed/canonicalized and any invalid entry rejects the whole configuration.
+func TestLoadValidatesAndNormalizesScanAllowedTargets(t *testing.T) {
+	t.Run("valid entries are trimmed and normalized", func(t *testing.T) {
+		setRequiredDatabaseConfig(t)
+		t.Setenv("SCAN_ALLOWED_TARGETS", " 192.168.64.2 , Example.COM , 2001:0db8:0:0:0:0:0:1 ")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() returned error: %v", err)
+		}
+		want := []string{"192.168.64.2", "example.com", "2001:db8::1"}
+		if !reflect.DeepEqual(cfg.ScanAllowedTargets, want) {
+			t.Fatalf("ScanAllowedTargets = %#v, want %#v", cfg.ScanAllowedTargets, want)
+		}
+	})
+
+	for _, entry := range []string{"192.168.64.999", "192.168.64.999.fas", "192.168.64.2.fas", "bad!hostname"} {
+		t.Run("invalid "+entry, func(t *testing.T) {
+			setRequiredDatabaseConfig(t)
+			t.Setenv("SCAN_ALLOWED_TARGETS", "192.168.64.2,"+entry+",example.com")
+
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load() accepted invalid allowlist entry %q with config %#v", entry, cfg)
+			}
+			if !strings.Contains(err.Error(), "SCAN_ALLOWED_TARGETS") || !strings.Contains(err.Error(), entry) {
+				t.Fatalf("Load() error %q should identify invalid allowlist entry %q", err, entry)
 			}
 		})
 	}

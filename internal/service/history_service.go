@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"nmap-api/internal/domain"
+	targetvalidation "nmap-api/internal/target"
 )
 
 const (
@@ -69,7 +70,7 @@ func NewHistoryService(repository HistoryRepository) *HistoryService {
 }
 
 func (s *HistoryService) History(ctx context.Context, target string, limit int) (HistoryResponse, error) {
-	normalized, _, err := normalizeTarget(target)
+	normalized, _, err := targetvalidation.Normalize(target)
 	if err != nil {
 		return HistoryResponse{}, &ValidationError{Code: "INVALID_TARGET", Message: "target is not a valid IPv4 address, IPv6 address, or hostname"}
 	}
@@ -92,7 +93,7 @@ func (s *HistoryService) History(ctx context.Context, target string, limit int) 
 }
 
 func (s *HistoryService) Changes(ctx context.Context, target string) (ChangesResponse, error) {
-	normalized, _, err := normalizeTarget(target)
+	normalized, _, err := targetvalidation.Normalize(target)
 	if err != nil {
 		return ChangesResponse{}, &ValidationError{Code: "INVALID_TARGET", Message: "target is not a valid IPv4 address, IPv6 address, or hostname"}
 	}

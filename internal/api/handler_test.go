@@ -89,6 +89,8 @@ func TestPostScansRejectsInvalidLimitsAndMalformedJSON(t *testing.T) {
 		{name: "timeout above maximum", maxBatch: 2, body: `{"targets":["allowed.example"],"timeout_seconds":121}`, wantCode: "INVALID_TIMEOUT"},
 		{name: "batch too large", maxBatch: 1, body: `{"targets":["allowed.example","192.0.2.1"]}`, wantCode: "BATCH_TOO_LARGE"},
 		{name: "malformed target", maxBatch: 2, body: `{"targets":["bad!hostname"]}`, wantCode: "INVALID_TARGET"},
+		{name: "out-of-range IPv4 suffix", maxBatch: 2, body: `{"targets":["192.168.64.999.fas"]}`, wantCode: "INVALID_TARGET"},
+		{name: "IPv4 address with hostname suffix", maxBatch: 2, body: `{"targets":["192.168.64.2.fas.fas.cfas"]}`, wantCode: "INVALID_TARGET"},
 		{name: "malformed JSON", maxBatch: 2, body: `{"targets":[`, wantCode: "INVALID_JSON"},
 	}
 	for _, test := range tests {

@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"nmap-api/internal/target"
 )
 
 type Config struct {
@@ -46,6 +48,13 @@ func Load() (Config, error) {
 	cfg.ScanAllowedTargets, err = getEnvList("SCAN_ALLOWED_TARGETS")
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid SCAN_ALLOWED_TARGETS: %w", err)
+	}
+	for index, entry := range cfg.ScanAllowedTargets {
+		normalized, _, err := target.Normalize(entry)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid SCAN_ALLOWED_TARGETS entry %q: %w", entry, err)
+		}
+		cfg.ScanAllowedTargets[index] = normalized
 	}
 	cfg.APIPort, err = getEnvInt("API_PORT", 8080)
 	if err != nil {

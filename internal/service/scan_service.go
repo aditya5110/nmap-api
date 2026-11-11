@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
 	"nmap-api/internal/domain"
+	targetvalidation "nmap-api/internal/target"
 	"nmap-api/internal/worker"
 )
 
@@ -60,7 +60,7 @@ func NewScanService(repository ScanRepository, maxBatchSize, defaultTimeout int,
 
 	allowed := make(map[string]struct{}, len(allowedTargets))
 	for _, target := range allowedTargets {
-		normalized, _, err := normalizeTarget(strings.TrimSpace(target))
+		normalized, _, err := targetvalidation.Normalize(strings.TrimSpace(target))
 		if err != nil {
 			return nil, fmt.Errorf("invalid SCAN_ALLOWED_TARGETS entry %q: %w", target, err)
 		}
@@ -94,7 +94,7 @@ func (s *ScanService) Submit(ctx context.Context, submission ScanSubmission) (Ac
 	jobs := make([]domain.ScanJob, 0, len(submission.Targets))
 	acceptedTargets := make([]AcceptedTarget, 0, len(submission.Targets))
 	for _, target := range submission.Targets {
-		normalized, targetType, err := normalizeTarget(target)
+		normalized, targetType, err := targetvalidation.Normalize(target)
 		if err != nil {
 			return AcceptedScan{}, &ValidationError{Code: "INVALID_TARGET", Message: fmt.Sprintf("target %q is not a valid IPv4 address, IPv6 address, or hostname", target)}
 		}
@@ -122,49 +122,6 @@ func (s *ScanService) Submit(ctx context.Context, submission ScanSubmission) (Ac
 	}
 
 	return AcceptedScan{RequestID: requestID, Status: "accepted", Targets: acceptedTargets}, nil
-}
-
-func normalizeTarget(target string) (normalized, targetType string, err error) {
-	if target == "" || strings.TrimSpace(target) != target {
-		return "", "", fmt.Errorf("target must be non-empty and must not contain surrounding whitespace")
-	}
-	if ip := net.ParseIP(target); ip != nil {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			return ipv4.String(), "ip", nil
-		}
-		return ip.String(), "ip", nil
-	}
-	if looksLikeMalformedIPv4(target) {
-		return "", "", fmt.Errorf("malformed IPv4 address")
-	}
-
-	hostname := strings.TrimSuffix(strings.ToLower(target), ".")
-	if len(hostname) == 0 || len(hostname) > 253 {
-		return "", "", fmt.Errorf("hostname length is invalid")
-	}
-	for _, label := range strings.Split(hostname, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return "", "", fmt.Errorf("hostname label is invalid")
-		}
-		for _, character := range label {
-			if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-') {
-				return "", "", fmt.Errorf("hostname contains an invalid character")
-			}
-		}
-	}
-	return hostname, "hostname", nil
-}
-
-func looksLikeMalformedIPv4(value string) bool {
-	if !strings.Contains(value, ".") {
-		return false
-	}
-	for _, character := range value {
-		if (character < '0' || character > '9') && character != '.' {
-			return false
-		}
-	}
-	return true
 }
 
 func newRequestUUID() (string, error) {
