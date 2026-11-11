@@ -20,6 +20,8 @@ docker compose up --build -d
 docker compose exec -T postgres psql -U appuser -d nmapdb < migrations/001_init.up.sql
 ```
 
+The migration command uses the default Compose database user and name. If `DB_USER` or `DB_NAME` differs in `.env`, use those values instead. The API does not apply migrations automatically. Invalid `SCAN_ALLOWED_TARGETS` entries (including malformed IP-like strings) make configuration loading fail; an empty allowlist denies scan submissions.
+
 `docker compose up --build -d` starts PostgreSQL, the API, and Prometheus. Docker Compose automatically reads `.env` for `${...}` interpolation in `docker-compose.yml` and passes the configured values into the containers. The API listens on port 8080, Prometheus on port 9090.
 
 Prometheus scrapes `api:8080/metrics` over the Compose network. For metric details and operating instructions, see [Prometheus metrics](#prometheus-metrics) and the [Prometheus guide](docs/prometheus-guide.md).
@@ -222,6 +224,8 @@ The `404 Not Found` response when no comparable pair is available is:
 ```bash
 go test ./...
 ```
+
+This runs the regular unit and package tests; it excludes the PostgreSQL tests guarded by the `integration` build tag. To run those tests, use a dedicated PostgreSQL test database and see the [testing guide](docs/testing-guide.md) for prerequisites, safe setup, exact commands (including running the test runner in a container), isolation, and cleanup. Do not point integration tests at a shared or valuable database.
 
 ### Prometheus metrics
 

@@ -173,7 +173,7 @@ Each entry in `added_ports`/`removed_ports` has `resolved_ip`, `port`, `protocol
 ### Shared validation and error behavior
 
 - A scan body must be one JSON value, no larger than 1 MiB, and contain no unknown fields. It requires at least one target and cannot exceed `MAX_BATCH_SIZE` targets.
-- Targets must be an IPv4 address, IPv6 address, or ASCII hostname. Surrounding whitespace is rejected. Hostname labels are 1–63 characters, total hostname length is at most 253, and labels cannot start or end with `-`.
+- Targets must be an IPv4 address, IPv6 address, or ASCII hostname. Surrounding whitespace, malformed IP-like values, IPv6 zone identifiers, and invalid DNS labels are rejected. Hostname labels are 1–63 characters, total hostname length is at most 253, and labels cannot start or end with `-`. IPv4-mapped IPv6 addresses normalize to IPv4.
 - Every target must match `SCAN_ALLOWED_TARGETS`. An empty or unset allowlist denies all scan requests. IP addresses are normalized for allowlist comparison; hostnames are lowercased and a trailing dot is ignored for comparison. Wildcards and CIDR entries are not supported.
 - `timeout_seconds` must be between 1 and 120 inclusive. The batch is fully validated before any rows are written; one invalid or disallowed member rejects the whole submission.
 - Common `400` codes are `INVALID_JSON`, `INVALID_REQUEST`, `BATCH_TOO_LARGE`, `INVALID_TIMEOUT`, `INVALID_TARGET`, `TARGET_NOT_ALLOWED`, `INVALID_LIMIT`, and `INVALID_STATE`.
@@ -318,7 +318,7 @@ For Compose: Docker with the Compose plugin. For running the API directly: Go 1.
 | `APP_ENV` | No | `development`; currently loaded but does not change application behavior. |
 | `POSTGRES_HOST_PORT` | Compose only | `5432`; host-side published PostgreSQL port. |
 
-Compose sets API/database connection values and reads `DB_USER`, `DB_NAME`, and `DB_PASSWORD` from `.env` interpolation. `.env.example` provides local sample values, including loopback targets; replace them with only systems you are authorized to scan. The allowlist is not authentication.
+Compose sets API/database connection values and reads `DB_USER`, `DB_NAME`, `DB_PASSWORD`, `SCAN_ALLOWED_TARGETS`, and `POSTGRES_HOST_PORT` from `.env` interpolation. `.env.example` provides local sample values, including loopback targets; replace them with only systems you are authorized to scan. Malformed allowlist values cause API configuration loading to fail. The allowlist is not authentication. Compose hard-codes `API_HOST`, `API_PORT`, `DB_PORT`, `DB_SSLMODE`, `WORKER_COUNT`, `MAX_BATCH_SIZE`, `DEFAULT_TIMEOUT_SECONDS`, and `APP_ENV`; changing these requires editing the Compose service configuration rather than adding them to `.env`.
 
 ### Start and migrate
 
@@ -342,6 +342,8 @@ To run the API directly, start/configure PostgreSQL, apply the migration, export
 
 ## 11. Testing
 
+The testing guide at [testing-guide.md](testing-guide.md) contains exact commands, PostgreSQL setup, container-based execution, isolation and cleanup details. The default `go test ./...` does not include tests behind the `integration` build tag. Integration tests connect to a real PostgreSQL database, but do not run the API server or Nmap; they exercise repository/database behavior in per-test schemas. Use a dedicated test database, not the normal development database.
+
 The repository has tests for:
 
 - API method handling, JSON responses, accepted batches, target/timeout/batch validation, history state filters, changes, and `/metrics` behavior.
@@ -351,10 +353,10 @@ The repository has tests for:
 - Scan/history service behavior, target matching, and port change semantics (including not synthesizing `closed`).
 - Repository transaction/rollback behavior and SQL expectations using `go-sqlmock`.
 - Worker processing, independent target failures, shutdown cancellation, timeout handling, periodic recovery, and terminal metrics recording.
-- PostgreSQL integration tests (build-tagged `integration`) for concurrent claims, lease retries/fencing, aggregation, migrations, result replacement, and history queries. They require a PostgreSQL connection configured by `DB_PASSWORD` and optional `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_NAME`, and `DB_SSLMODE`; the database user must be allowed to create schemas. Tests create an isolated schema and apply the migration within it.
+- PostgreSQL integration tests (build-tagged `integration`) for transactional rollback, migration indexes, concurrent claims, lease retries/fencing and recovery, request-status aggregation, result replacement, history ordering/limits/multiple IPs, comparable scans, and hostname matching. They require a PostgreSQL connection configured by required `DB_PASSWORD` and optional `DB_HOST` (default `localhost`), `DB_PORT` (`5432`), `DB_USER` (`appuser`), `DB_NAME` (`nmapdb`), and `DB_SSLMODE` (`disable`). The role must be allowed to create and drop schemas. Each test creates a random isolated schema, applies the initial migration there, and drops the schema during cleanup; it does not truncate tables in the database's normal schema.
 - API shutdown ordering in `cmd/api`.
 
-Run unit tests with `go test ./...`. Run PostgreSQL integration tests with `go test -tags=integration ./internal/db` after configuring a test database. These commands are documented for developers; tests were not run as part of this documentation-only change.
+Run the regular tests with `go test ./...`, or both regular and integration tests with `go test -tags=integration ./... -count=1`. For the focused PostgreSQL package, use `go test -tags=integration ./internal/db -count=1 -v`. The repository/DB integration tests do not verify HTTP endpoints, actual Nmap execution, or end-to-end worker-pool processing; those are covered by handler/service/worker unit tests with dependencies isolated or faked. The XML parser and Nmap runner are separately tested; runner tests use a temporary fake executable rather than scanning a network target. See [testing-guide.md](testing-guide.md) for database safety guidance and detailed commands.
 
 ## 12. Limitations and future improvements
 
